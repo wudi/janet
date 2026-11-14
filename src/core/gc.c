@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -321,9 +321,13 @@ static void janet_deinit_block(JanetGCObject *mem) {
             janet_symbol_deinit(((JanetStringHead *) mem)->data);
             break;
         case JANET_MEMORY_ARRAY:
+        case JANET_MEMORY_ARRAY_WEAK:
             janet_free(((JanetArray *) mem)->data);
             break;
         case JANET_MEMORY_TABLE:
+        case JANET_MEMORY_TABLE_WEAKK:
+        case JANET_MEMORY_TABLE_WEAKV:
+        case JANET_MEMORY_TABLE_WEAKKV:
             janet_free(((JanetTable *) mem)->data);
             break;
         case JANET_MEMORY_FIBER: {
@@ -332,6 +336,8 @@ static void janet_deinit_block(JanetGCObject *mem) {
             if (f->ev_state && !(f->flags & JANET_FIBER_EV_FLAG_IN_FLIGHT)) {
                 janet_ev_dec_refcount();
                 janet_free(f->ev_state);
+            } else if (f->gc.flags & JANET_FIBER_EV_GCFLAG_SUSPENDED) {
+                janet_ev_dec_refcount();
             }
 #endif
             janet_free(f->data);
@@ -342,6 +348,9 @@ static void janet_deinit_block(JanetGCObject *mem) {
             break;
         case JANET_MEMORY_ABSTRACT: {
             JanetAbstractHead *head = (JanetAbstractHead *)mem;
+            if (head->type->gcperthread) {
+                janet_assert(!head->type->gcperthread(head->data, head->size), "per-thread finalizer failed");
+            }
             if (head->type->gc) {
                 janet_assert(!head->type->gc(head->data, head->size), "finalizer failed");
             }
@@ -493,15 +502,11 @@ void janet_sweep() {
             /* If not visited... */
             if (!janet_truthy(items[i].value)) {
                 void *abst = janet_unwrap_abstract(items[i].key);
-                if (0 == janet_abstract_decref(abst)) {
-                    /* Run finalizer */
-                    JanetAbstractHead *head = janet_abstract_head(abst);
-                    if (head->type->gc) {
-                        janet_assert(!head->type->gc(head->data, head->size), "finalizer failed");
-                    }
-                    /* Free memory */
-                    janet_free(janet_abstract_head(abst));
+                JanetAbstractHead *head = janet_abstract_head(abst);
+                if (head->type->gcperthread) {
+                    janet_assert(!head->type->gcperthread(head->data, head->size), "per-thread finalizer failed");
                 }
+                janet_abstract_decref_maybe_free(abst);
 
                 /* Mark as tombstone in place */
                 items[i].key = janet_wrap_nil();
@@ -587,7 +592,12 @@ void janet_collect(void) {
 #ifdef JANET_EV
     janet_ev_mark();
 #endif
-    janet_mark_fiber(janet_vm.root_fiber);
+    if (janet_vm.top_dyns) {
+        janet_mark(janet_wrap_table(janet_vm.top_dyns));
+    }
+    if (janet_vm.root_fiber != NULL) { /* Can be NULL if janet_collect called outside of interpreter loop */
+        janet_mark_fiber(janet_vm.root_fiber);
+    }
     for (i = 0; i < orig_rootcount; i++)
         janet_mark(janet_vm.roots[i]);
     while (orig_rootcount < janet_vm.root_count) {
@@ -635,9 +645,9 @@ static int janet_gc_idequals(Janet lhs, Janet rhs) {
 /* Remove a root value from the GC. This allows the gc to potentially reclaim
  * a value and all its children. */
 int janet_gcunroot(Janet root) {
-    Janet *vtop = janet_vm.roots + janet_vm.root_count;
     /* Search from top to bottom as access is most likely LIFO */
-    for (Janet *v = janet_vm.roots; v < vtop; v++) {
+    for (Janet *v = janet_vm.roots + janet_vm.root_count; v > janet_vm.roots;) {
+        v--;
         if (janet_gc_idequals(root, *v)) {
             *v = janet_vm.roots[--janet_vm.root_count];
             return 1;
@@ -648,13 +658,12 @@ int janet_gcunroot(Janet root) {
 
 /* Remove a root value from the GC. This sets the effective reference count to 0. */
 int janet_gcunrootall(Janet root) {
-    Janet *vtop = janet_vm.roots + janet_vm.root_count;
     int ret = 0;
     /* Search from top to bottom as access is most likely LIFO */
-    for (Janet *v = janet_vm.roots; v < vtop; v++) {
+    for (Janet *v = janet_vm.roots + janet_vm.root_count; v > janet_vm.roots;) {
+        v--;
         if (janet_gc_idequals(root, *v)) {
             *v = janet_vm.roots[--janet_vm.root_count];
-            vtop--;
             ret = 1;
         }
     }
@@ -668,13 +677,11 @@ void janet_clear_memory(void) {
     for (int32_t i = 0; i < janet_vm.threaded_abstracts.capacity; i++) {
         if (janet_checktype(items[i].key, JANET_ABSTRACT)) {
             void *abst = janet_unwrap_abstract(items[i].key);
-            if (0 == janet_abstract_decref(abst)) {
-                JanetAbstractHead *head = janet_abstract_head(abst);
-                if (head->type->gc) {
-                    janet_assert(!head->type->gc(head->data, head->size), "finalizer failed");
-                }
-                janet_free(janet_abstract_head(abst));
+            JanetAbstractHead *head = janet_abstract_head(abst);
+            if (head->type->gcperthread) {
+                janet_assert(!head->type->gcperthread(head->data, head->size), "per-thread finalizer failed");
             }
+            janet_abstract_decref_maybe_free(abst);
         }
     }
 #endif

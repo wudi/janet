@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose & contributors
+# Copyright (c) 2026 Calvin Rose & contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -20,6 +20,21 @@
 
 (import ./helper :prefix "" :exit true)
 (start-suite)
+
+(setdyn *lint-warn* :none)
+
+(defn decide-test-host [port]
+  (if-let [host (os/getenv "JANET_TEST_HOST")]
+    host
+    (try
+      (let [s (net/listen "localhost." port)
+            [host _] (net/localname s)]
+        (net/close s)
+        host)
+      ([] "127.0.0.1"))))
+
+(def test-port (os/getenv "JANET_TEST_PORT" "8761"))
+(def test-host (decide-test-host test-port))
 
 # Subprocess
 # 5e1a8c86f
@@ -102,6 +117,8 @@
       (calc-2 "(+ 5 6 7 8)")
       (calc-2 "(+ 9 10 11 12)"))
     @[10 26 42]) "parallel subprocesses 2")
+
+# (print "file piping")
 
 # File piping
 # a1cc5ca04
@@ -192,11 +209,11 @@
       (net/write stream b)
       (buffer/clear b)))
 
-  (def s (net/server "127.0.0.1" "8000" handler))
+  (def s (net/server test-host test-port handler))
   (assert s "made server 1")
 
   (defn test-echo [msg]
-    (with [conn (net/connect "127.0.0.1" "8000")]
+    (with [conn (assert (net/connect test-host test-port))]
       (net/write conn msg)
       (def res (net/read conn 1024))
       (assert (= (string res) msg) (string "echo " msg))))
@@ -210,27 +227,35 @@
 
 # Test on both server and client
 # 504411e
+(var iterations 0)
 (defn names-handler
   [stream]
   (defer (:close stream)
     # prevent immediate close
     (ev/read stream 1)
     (def [host port] (net/localname stream))
-    (assert (= host "127.0.0.1") "localname host server")
-    (assert (= port 8000) "localname port server")))
+    (assert (= host test-host) "localname host server")
+    (assert (= port (scan-number test-port)) "localname port server")
+    (++ iterations)
+    (ev/write stream " ")))
+
+# (print "local name / peer name testing")
 
 # Test localname and peername
 # 077bf5eba
 (repeat 10
-  (with [s (net/server "127.0.0.1" "8000" names-handler)]
+  (with [s (net/server test-host test-port names-handler)]
     (repeat 10
-      (with [conn (net/connect "127.0.0.1" "8000")]
+      (with [conn (assert (net/connect test-host test-port))]
         (def [host port] (net/peername conn))
-        (assert (= host "127.0.0.1") "peername host client ")
-        (assert (= port 8000) "peername port client")
-        # let server close
-        (ev/write conn " "))))
+        (assert (= host test-host) "peername host client ")
+        (assert (= port (scan-number test-port)) "peername port client")
+        (++ iterations)
+        (ev/write conn " ")
+        (ev/read conn 1))))
   (gccollect))
+
+(assert (= iterations 200) "localname and peername not enough checks")
 
 # Create pipe
 # 12f09ad2d
@@ -371,5 +396,295 @@
 (def f (ev/go |(ev/sleep 1e9) nil superv))
 (ev/cancel f (gensym))
 (ev/take superv)
+
+# Chat server test
+(def conmap @{})
+
+(defn broadcast [em msg]
+  (eachk par conmap
+         (if (not= par em)
+           (if-let [tar (get conmap par)]
+             (net/write tar (string/format "[%s]:%s" em msg))))))
+
+(defn handler
+  [connection]
+  (net/write connection "Whats your name?\n")
+  (def name (string/trim (string (ev/read connection 100))))
+  (if (get conmap name)
+    (do
+      (net/write connection "Name already taken!")
+      (:close connection))
+    (do
+      (put conmap name connection)
+      (net/write connection (string/format "Welcome %s\n" name))
+      (defer (do
+               (put conmap name nil)
+               (:close connection))
+        (while (def msg (ev/read connection 100))
+          (broadcast name (string msg)))))))
+
+# (print "chat app testing")
+
+# Now launch the chat server
+(def chat-server (net/listen test-host test-port))
+(ev/spawn
+    (forever
+      (def [ok connection] (protect (net/accept chat-server)))
+      (if (and ok connection)
+        (ev/call handler connection)
+        (break))))
+
+# Make sure we can't bind again with no-reuse
+(assert-error "no-reuse"
+              (net/listen test-host test-port :stream true))
+
+# Read from socket
+
+(defn expect-read
+  [stream text]
+  (def result (string (net/read stream 100)))
+  (assert (= result text) (string/format "expected %v, got %v" text result)))
+
+# Now do our telnet chat
+(def bob (assert (net/connect test-host test-port :stream)))
+(expect-read bob "Whats your name?\n")
+(net/write bob "bob")
+(expect-read bob "Welcome bob\n")
+(def alice (assert (net/connect test-host test-port)))
+(expect-read alice "Whats your name?\n")
+(net/write alice "alice")
+(expect-read alice "Welcome alice\n")
+
+# Bob says hello, alice gets the message
+(net/write bob "hello\n")
+(expect-read alice "[bob]:hello\n")
+
+# Alice says hello, bob gets the message
+(net/write alice "hi\n")
+(expect-read bob "[alice]:hi\n")
+
+# Ted joins the chat server
+(def ted (assert (net/connect test-host test-port)))
+(expect-read ted "Whats your name?\n")
+(net/write ted "ted")
+(expect-read ted "Welcome ted\n")
+
+# Ted says hi, alice and bob get message
+(net/write ted "hi\n")
+(expect-read alice "[ted]:hi\n")
+(expect-read bob "[ted]:hi\n")
+
+# Bob leaves for work. Now it's just ted and alice
+(:close bob)
+
+# Alice messages ted, ted gets message
+(net/write alice "wuzzup\n")
+(expect-read ted "[alice]:wuzzup\n")
+(net/write ted "not much\n")
+(expect-read alice "[ted]:not much\n")
+
+# Alice bounces
+(:close alice)
+
+# Ted can send messages, nobody gets them :(
+(net/write ted "hello?\n")
+(:close ted)
+
+# Close chat server
+(:close chat-server)
+
+# Issue #1531
+(defn sleep-print [x] (ev/sleep 0) (print x))
+(protect (with-dyns [*out* sleep-print] (prin :foo)))
+(defn level-trigger-handling [conn &] (:close conn))
+(def s (assert (net/server test-host test-port level-trigger-handling)))
+(def c (assert (net/connect test-host test-port)))
+(:close s) # closing s before net/server's accept loop starts.
+
+# Issue #1531 no. 2
+(def c (ev/chan 0))
+(ev/spawn (while (def x (ev/take c))))
+(defn print-to-chan [x] (ev/give c x))
+(assert-error "coerce await inside janet_call to error"
+              (with-dyns [*out* print-to-chan]
+                (pp :foo)))
+(ev/chan-close c)
+
+# soreuseport on unix domain sockets
+(compwhen (or (= :macos (os/which)) (= :linux (os/which)))
+  (assert-no-error "unix-domain socket reuseaddr"
+                   (let [uds-path "./unix-domain-socket"]
+                     (defer (os/rm uds-path)
+                       (let [s (net/listen :unix uds-path :stream)]
+                         (:close s))))))
+
+# (print "accept loop testing")
+
+# net/accept-loop level triggering
+(gccollect)
+(def maxconn 50)
+(var connect-count 0)
+(defn level-trigger-handling
+  [conn &]
+  (with [conn conn]
+    (ev/write conn (ev/read conn 4096))
+    (++ connect-count)))
+(def s (assert (net/server test-host test-port level-trigger-handling)))
+(def cons @[])
+(repeat maxconn (array/push cons (assert (net/connect test-host test-port))))
+(assert (= maxconn (length cons)))
+(defn do-connect [i]
+  (with [c (get cons i)]
+    (ev/write c "abc123")
+    (ev/read c 4096)))
+(for i 0 maxconn (ev/spawn (do-connect i)))
+(ev/sleep 0.1)
+(assert (= maxconn connect-count))
+(:close s)
+
+# (print "running deadline tests...")
+
+# Cancel os/proc-wait with ev/deadline
+(let [p (os/spawn [;run janet "-e" "(os/sleep 4)"] :p)]
+  (var terminated-normally false)
+  (assert-error "deadline expired"
+                (ev/with-deadline 0.01
+                  (os/proc-wait p)
+                  (print "uhoh")
+                  (set terminated-normally true)))
+  (assert (not terminated-normally) "early termination failure")
+  # Without this kill, janet will wait the full 4 seconds for the subprocess to complete before exiting.
+  (assert-no-error "kill proc after wait failed" (os/proc-kill p)))
+
+# Cancel os/proc-wait with ev/deadline 2
+(let [p (os/spawn [;run janet "-e" "(os/sleep 0.1)"] :p)]
+  (var terminated-normally false)
+  (assert-error "deadline expired"
+                (ev/with-deadline 0.05
+                  (os/proc-wait p)
+                  (print "uhoh")
+                  (set terminated-normally true)))
+  (assert (not terminated-normally) "early termination failure 2")
+  (ev/sleep 0.15)
+  (assert (not terminated-normally) "early termination failure 3"))
+
+# Deadline with interrupt
+(defmacro with-deadline2
+  ``
+  Create a fiber to execute `body`, schedule the event loop to cancel
+  the task (root fiber) associated with `body`'s fiber, and start
+  `body`'s fiber by resuming it.
+
+  The event loop will try to cancel the root fiber if `body`'s fiber
+  has not completed after at least `sec` seconds.
+
+  `sec` is a number that can have a fractional part.
+  ``
+  [sec & body]
+  (with-syms [f]
+    ~(let [,f (coro ,;body)]
+       (,ev/deadline ,sec nil ,f true)
+       (,resume ,f))))
+
+(for i 0 10
+  # (print "deadline 1 iteration " i)
+  (assert (= :done (with-deadline2 10
+                     (ev/sleep 0.01)
+                     :done)) "deadline with interrupt exits normally"))
+
+(for i 0 10
+  # (print "deadline 2 iteration " i)
+  (let [f (coro (forever :foo))]
+    (ev/deadline 0.01 nil f true)
+    (assert-error "deadline expired" (resume f))))
+
+# Use :err :stdout
+(def- subproc-code '(do (eprint "hi") (eflush) (print "there") (flush)))
+(defn ev/slurp
+  [f &opt buf]
+  (default buf @"")
+  (if (ev/read f 0x10000 buf)
+    (ev/slurp f buf)
+    buf))
+(def p (os/spawn [;run janet "-e" (string/format "%j" subproc-code)] :px {:out :pipe :err :out}))
+(def [exit-code data]
+  (ev/gather
+    (os/proc-wait p)
+    (ev/slurp (p :out))))
+(def data (string/replace-all "\r" "" data))
+(assert (zero? exit-code) "subprocess ran")
+(assert (= data "hi\nthere\n") "output is correct")
+
+# Error handling
+(assert-error "bad thread" (ev/thread in))
+(assert-error "bad thread 2" (ev/thread (fn [x y] x) 1))
+
+# Waiting on streams sent to another thread
+# Not on Windows, where sent sockets are not duplicated
+(unless (index-of (os/which) [:mingw :windows])
+  (defn wait-in-thread
+    "Send stream to a thread that runs (f stream) once it is ready to wait."
+    [stream f trigger]
+    (def ch (ev/thread-chan 1))
+    (ev/thread
+      (fn [[s c f]]
+        (ev/give c :ready)
+        (ev/give c (protect (ev/with-deadline 1 (f s)))))
+      [stream ch f] :n)
+    (def [ok res]
+      (protect (ev/with-deadline 5
+                 (ev/take ch)
+                 (ev/sleep 0.05)
+                 (trigger)
+                 (ev/take ch))))
+    (if ok res [false res]))
+  (let [s (net/listen test-host "0")
+        [_ port] (net/localname s)]
+    (assert (= [true :accepted]
+               (wait-in-thread s |(do (:close (net/accept $)) :accepted)
+                               |(:close (net/connect test-host port))))
+            "net/accept on stream sent to thread")
+    (:close s))
+  (let [[r w] (os/pipe)]
+    (assert (= [true "hello"]
+               (wait-in-thread r |(string (ev/read $ 5)) |(ev/write w "hello")))
+            "ev/read on stream sent to thread")
+    (:close r)
+    (:close w)))
+
+# Exec-slurp correct error (os/spawn and the :x flag)
+(defn exec-slurp
+  [& args]
+  # Close the process pipes. If the process pipes are not closed, janet can run out of file descriptors.
+  (with [proc (os/spawn args :xp {:out :pipe})]
+    (let [[out] (ev/gather
+                  (ev/read (proc :out) :all)
+                  (os/proc-wait proc))]
+      (if out (string/trimr out) ""))))
+(def [ok msg] (protect (exec-slurp ;run janet "-e" "(os/exit 1)")))
+(assert (not ok) "os/spawn :x 1")
+(assert (not (string/has-prefix? "cannot cancel" msg)) "os/spawn :x 2")
+(assert (string/has-prefix? "command failed" msg) "os/spawn :x 3")
+
+# OS shell
+(defn- shell-quote
+  [x]
+  (if (index-of (os/which) [:mingw :windows])
+    (string `"` x `"`)
+    (string "'" x "'")))
+(assert (= 0 (os/shell (string/join [;run janet "-e" (shell-quote "(os/exit 0)")] " "))) "os/shell simple")
+
+# os/spawn and os/execute when program does not exist gives a normal error
+(def dne-path "this-long-binary-name-does-not-exist")
+(assert (nil? (os/stat dne-path :mode)) "binary path does not exist 1")
+(assert (let [[ok _result]
+              (protect
+                (let [process (os/spawn [dne-path] :p)]
+                  # if initial process launch works, it should at least fail with a non-zero exit code.
+                  (if-not (= 0 (:wait process))
+                    (error "should error"))))]
+          (not ok))
+        "binary path does not exist 2 - os/spawn")
+(assert (let [[ok _result] (protect (os/execute [dne-path] :px))] (not ok)) "binary path does not exist 2 - os/execute")
 
 (end-suite)

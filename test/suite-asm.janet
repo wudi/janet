@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2026 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -20,6 +20,8 @@
 
 (import ./helper :prefix "" :exit true)
 (start-suite)
+
+(setdyn *lint-warn* :none)
 
 # Assembly test
 # Fibonacci sequence, implemented with naive recursion.
@@ -50,6 +52,49 @@
 # dacbe29
 (def f (asm (disasm (fn [x] (fn [y] (+ x y))))))
 (assert (= ((f 10) 37) 47) "asm environment tables")
+
+# issue #1424
+(assert-no-error "arity > used slots (issue #1424)"
+                 (asm
+                   (disasm
+                     (fn []
+                       (def foo (fn [one two] one))
+                       (foo 100 200)))))
+
+# Reject out-of-range captured environment index. Only -1 (capture current
+# frame) or a non-negative index is valid; a value below -1 would make
+# JOP_CLOSURE read func->envs out of bounds.
+(assert-error "environment index below -1"
+              (asm ~{:arity 1 :min-arity 1 :max-arity 1 :slotcount 2
+                     :bytecode [(clo 1 0) (ret 1)]
+                     :defs @[@{:arity 0 :min-arity 0 :max-arity 0 :slotcount 1
+                               :bytecode [(ldi 0 0) (ret 0)]
+                               :environments @[-1000000]}]}))
+
+# Optimization in assembler
+# a bit brittle, but easy to fix
+(def optimized (disasm (asm ~{:bytecode [(ldi 0 10) (movn 1 0) (add 2 0 1) (add 3 1 1) (add 4 0 0) (add 5 2 3) (ret 5)] :slotcount 40} :o) :bytecode))
+(assert (deep= optimized '@[(ldi 0 40) (ret 0)]) "bytecode optimization 1")
+
+# short sourcemap/symbolmap entries must not read past the tuple
+(assert-error "short sourcemap entry" (asm '{:arity 0 :bytecode [(ret 0)] :sourcemap [[1]]}))
+(assert-error "short symbolmap entry" (asm '{:arity 0 :bytecode [(ret 0)] :symbolmap [[1 2 3]]}))
+
+# named_args_count must not exceed the constant array; the optimizer sets one
+# bit per named arg in a bitset sized for the constants, so an oversized count
+# wrote past that allocation (asan heap-buffer-overflow in bytecode.c).
+(assert-error "named args exceed constants"
+              (asm '{:arity 1 :bytecode [(retn)] :constants [1] :namedargs 100000} :o))
+
+# structarg/namedargs reserve a tuple slot at index arity, like vararg, so
+# slotcount must leave room for it. The compiler always pairs them with
+# vararg, but the assembler can set the flag while slotcount == arity; the
+# optimizer's slot compaction then pinned slot arity and wrote past the remap
+# buffer (asan heap-buffer-overflow in janet_bytecode_compact_slots).
+(assert-error "structarg with no room for tuple slot"
+              (asm '{:arity 1 :structarg true :bytecode [(ret 0)]} :o))
+(assert-error "namedargs with no room for tuple slot"
+              (asm '{:arity 1 :namedargs 0 :bytecode [(ret 0)]} :o))
 
 (end-suite)
 

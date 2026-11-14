@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -23,6 +23,7 @@
 #ifndef JANET_AMALG
 #include "features.h"
 #include <janet.h>
+#include "fiber.h"
 #include "gc.h"
 #include "state.h"
 #include "util.h"
@@ -102,7 +103,7 @@ void janet_stacktrace(JanetFiber *fiber, Janet err) {
 }
 
 /* Error reporting. This can be emulated from within Janet, but for
- * consitency with the top level code it is defined once. */
+ * consistency with the top level code it is defined once. */
 void janet_stacktrace_ext(JanetFiber *fiber, Janet err, const char *prefix) {
 
     int32_t fi;
@@ -164,7 +165,7 @@ void janet_stacktrace_ext(JanetFiber *fiber, Janet err, const char *prefix) {
                 }
             }
             if (frame->flags & JANET_STACKFRAME_TAILCALL)
-                janet_eprintf(" (tailcall)");
+                janet_eprintf(" (tail call)");
             if (frame->func && frame->pc) {
                 int32_t off = (int32_t)(frame->pc - def->bytecode);
                 if (def->sourcemap) {
@@ -180,6 +181,11 @@ void janet_stacktrace_ext(JanetFiber *fiber, Janet err, const char *prefix) {
                 }
             }
             janet_eprintf("\n");
+            /* Print fiber points optionally. Clutters traces but provides info
+            if (i <= 0 && fi > 0) {
+                janet_eprintf("  in parent fiber\n");
+            }
+            */
         }
     }
 
@@ -227,10 +233,10 @@ JANET_CORE_FN(cfun_debug_break,
 }
 
 JANET_CORE_FN(cfun_debug_unbreak,
-              "(debug/unbreak source line column)",
-              "Remove a breakpoint with a source key at a given line and column. "
-              "Will throw an error if the breakpoint "
-              "cannot be found.") {
+              "(debug/unbreak source line col)",
+              "Remove a breakpoint from `source` at a given `line` and "
+              "`col`. Will throw an error if the breakpoint cannot be "
+              "found.") {
     JanetFuncDef *def;
     int32_t offset = 0;
     helper_find(argc, argv, &def, &offset);
@@ -338,14 +344,26 @@ static Janet doframe(JanetStackFrame *frame) {
                 Janet value = janet_wrap_nil();
                 uint32_t pc = (uint32_t)(frame->pc - def->bytecode);
                 if (jsm.birth_pc == UINT32_MAX) {
-                    JanetFuncEnv *env = frame->func->envs[jsm.death_pc];
-                    if (env->offset > 0) {
-                        value = env->as.fiber->data[env->offset + jsm.slot_index];
-                    } else {
-                        value = env->as.values[jsm.slot_index];
+                    /* death_pc has secondary meaning here, we use it to encode the environment index */
+                    if (jsm.death_pc < (uint32_t) def->environments_length) {
+                        /* death_pc is in valid range */
+                        JanetFuncEnv *env = frame->func->envs[jsm.death_pc];
+                        janet_env_valid(env);
+                        if (jsm.slot_index < (uint32_t) env->length) {
+                            /* slot_index range good */
+                            if (env->offset > 0) {
+                                /* On stack */
+                                value = env->as.fiber->data[env->offset + jsm.slot_index];
+                            } else {
+                                /* Off stack */
+                                value = env->as.values[jsm.slot_index];
+                            }
+                        }
                     }
                 } else if (pc >= jsm.birth_pc && pc < jsm.death_pc) {
-                    value = stack[jsm.slot_index];
+                    if (jsm.slot_index < (uint32_t) def->slotcount) {
+                        value = stack[jsm.slot_index];
+                    }
                 }
                 janet_table_put(local_bindings, janet_wrap_symbol(jsm.symbol), value);
             }
@@ -386,10 +404,11 @@ JANET_CORE_FN(cfun_debug_stack,
 }
 
 JANET_CORE_FN(cfun_debug_stacktrace,
-              "(debug/stacktrace fiber &opt err prefix)",
-              "Prints a nice looking stacktrace for a fiber. Can optionally provide "
-              "an error value to print the stack trace with. If `err` is nil or not "
-              "provided, and no prefix is given, will skip the error line. Returns the fiber.") {
+              "(debug/stacktrace fib &opt err prefix)",
+              "Prints a nice looking stack trace for a fiber `fib`. "
+              "Optionally provide an error value `err` to print the "
+              "stack trace with. If `prefix` is nil or not provided, skips "
+              "the error line. Returns `fib`.") {
     janet_arity(argc, 1, 3);
     JanetFiber *fiber = janet_getfiber(argv, 0);
     Janet x = argc == 1 ? janet_wrap_nil() : argv[1];
@@ -399,23 +418,26 @@ JANET_CORE_FN(cfun_debug_stacktrace,
 }
 
 JANET_CORE_FN(cfun_debug_argstack,
-              "(debug/arg-stack fiber)",
-              "Gets all values currently on the fiber's argument stack. Normally, "
-              "this should be empty unless the fiber signals while pushing arguments "
-              "to make a function call. Returns a new array.") {
+              "(debug/arg-stack fib)",
+              "Gets all values currently on a fiber `fib`'s argument stack. "
+              "Normally this is empty unless `fib` signals while pushing "
+              "arguments to make a function call. Returns a new array.") {
     janet_fixarity(argc, 1);
     JanetFiber *fiber = janet_getfiber(argv, 0);
     JanetArray *array = janet_array(fiber->stacktop - fiber->stackstart);
-    memcpy(array->data, fiber->data + fiber->stackstart, array->capacity * sizeof(Janet));
-    array->count = array->capacity;
+    if (array->capacity) {
+        memcpy(array->data, fiber->data + fiber->stackstart, array->capacity * sizeof(Janet));
+        array->count = array->capacity;
+    }
     return janet_wrap_array(array);
 }
 
 JANET_CORE_FN(cfun_debug_step,
-              "(debug/step fiber &opt x)",
-              "Run a fiber for one virtual instruction of the Janet machine. Can optionally "
-              "pass in a value that will be passed as the resuming value. Returns the signal value, "
-              "which will usually be nil, as breakpoints raise nil signals.") {
+              "(debug/step fib &opt x)",
+              "Run a fiber `fib` for one virtual instruction of the Janet "
+              "machine. Optionally pass in a value `x` that will be passed "
+              "as the resuming value. Returns the signal value, which is "
+              "usually nil, as breakpoints raise nil signals.") {
     janet_arity(argc, 1, 2);
     JanetFiber *fiber = janet_getfiber(argv, 0);
     Janet out = janet_wrap_nil();

@@ -156,7 +156,7 @@ Shows the version text and exits immediately.
 
 .TP
 .BR \-s
-Read raw input from stdin and forgo prompt history and other readline-like features.
+Read raw input from stdin and forgo fancy input, which includes prompt history and other readline-like features.
 
 .TP
 .BR \-e\ code
@@ -178,14 +178,6 @@ See docs for the `short-fn` function for more details.
 Enable debug mode. On all terminating signals as well the debug signal, this will
 cause the debugger to come up in the REPL. Same as calling (setdyn :debug true) in a
 default repl.
-
-.TP
-.BR \-n
-Disable ANSI colors in the repl. Has no effect if no repl is run.
-
-.TP
-.BR \-N
-Enable ANSI colors in the repl. Has no effect if no repl is run.
 
 .TP
 .BR \-r
@@ -214,7 +206,7 @@ Don't execute a script, only compile it to check for errors. Useful for linting 
 .BR \-m\ syspath
 Set the dynamic binding :syspath to the string syspath so that Janet will load system modules
 from a directory different than the default. The default is set when Janet is built, and defaults to
-/usr/local/lib/janet on Linux/Posix, and C:/Janet/Library on Windows. This option supersedes JANET_PATH.
+/usr/local/lib/janet on Linux/Posix. On Windows, there is no default value. This option supersedes JANET_PATH.
 
 .TP
 .BR \-c\ source\ output
@@ -228,22 +220,65 @@ When this flag is passed, a script passed to the interpreter will be treated as 
 rather than a janet source file.
 
 .TP
+.BR \-n
+Disable ANSI colors in the repl. Has no effect if no repl is run.
+
+.TP
+.BR \-N
+Enable ANSI colors in the repl. Has no effect if no repl is run.
+
+.TP
 .BR \-l\ lib
 Import a Janet module before running a script or repl. Multiple files can be loaded
 in this manner, and exports from each file will be made available to the script
 or repl.
+
+.TP
+.BR \-t\ lib\ arguments...
+Import a Janet module before running its main function.
+
 .TP
 .BR \-w\ level
 Set the warning linting level for Janet.
 This linting level should be one of :relaxed, :none, :strict, :normal, or a
 Janet number. Any linting message that is of a greater lint level than this setting will be displayed as
 a warning, but not stop compilation or execution.
+
 .TP
 .BR \-x\ level
 Set the error linting level for Janet.
 This linting level should be one of :relaxed, :none, :strict, :normal, or a
 Janet number. Any linting message that is of a greater lint level will cause a compilation error
 and stop compilation.
+
+.TP
+.BR \-b\ dirpath
+Install a bundle from a directory.
+
+.TP
+.BR \-B\ name
+Reinstall a bundle by bundle name.
+
+.TP
+.BR \-u\ name
+Uninstall a bundle by bundle name.
+
+.TP
+.BR \-U
+Reinstall all installed bundles.
+
+.TP
+.BR \-P
+Uninstall all bundles that are orphaned.
+
+.TP
+.BR \-L
+List all installed bundles.
+
+.TP
+.BR \-z\ hooks...
+Manually execute software lifecycle hooks from the ./bundle module.
+
 .TP
 .BR \-\-
 Stop parsing command line arguments. All arguments after this one will be considered file names
@@ -255,7 +290,7 @@ and then arguments to the script.
 .RS
 The location to look for Janet libraries. This is the only environment variable Janet needs to
 find native and source code modules. If no JANET_PATH is set, Janet will look in
-the default location set at compile time.
+the default location set at compile time. This should be a colon-separated list of directory names on Linux/Posix, and a semicolon-separated list on Windows. Note that a typical setup (i.e. not NixOS / Guix) will only use a single directory.
 .RE
 
 .B JANET_PROFILE
@@ -270,6 +305,12 @@ To disable randomization of Janet's PRF on start up, one can set this variable. 
 effect of making programs deterministic that otherwise would depend on the random seed chosen at program start.
 This variable does nothing in the default configuration of Janet, as PRF is disabled by default. Also, JANET_REDUCED_OS
 cannot be defined for this variable to have an effect.
+.RE
+
+.B JANET_HISTFILE
+.RS
+A file location to use for the default shell's REPL history when using fancy input. This relative path is where commands are persisted between sessions.
+If unset, no repl history well be used. Does not work with the -s flag where fancy input is disabled.
 .RE
 
 .B NO_COLOR

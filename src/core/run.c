@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -26,9 +26,10 @@
 #include "state.h"
 #endif
 
-/* Run a string */
+/* Run a string of code. The return value is a set of error flags, JANET_DO_ERROR_RUNTIME, JANET_DO_ERROR_COMPILE, and JANET_DOR_ERROR_PARSE if
+ * any errors were encountered in those phases. More information is printed to stderr. */
 int janet_dobytes(JanetTable *env, const uint8_t *bytes, int32_t len, const char *sourcePath, Janet *out) {
-    JanetParser parser;
+    JanetParser *parser;
     int errflags = 0, done = 0;
     int32_t index = 0;
     Janet ret = janet_wrap_nil();
@@ -37,14 +38,16 @@ int janet_dobytes(JanetTable *env, const uint8_t *bytes, int32_t len, const char
 
     if (where) janet_gcroot(janet_wrap_string(where));
     if (NULL == sourcePath) sourcePath = "<unknown>";
-    janet_parser_init(&parser);
+    parser = janet_abstract(&janet_parser_type, sizeof(JanetParser));
+    janet_parser_init(parser);
+    janet_gcroot(janet_wrap_abstract(parser));
 
     /* While we haven't seen an error */
     while (!done) {
 
         /* Evaluate parsed values */
-        while (janet_parser_has_more(&parser)) {
-            Janet form = janet_parser_produce(&parser);
+        while (janet_parser_has_more(parser)) {
+            Janet form = janet_parser_produce(parser);
             JanetCompileResult cres = janet_compile(form, env, where);
             if (cres.status == JANET_COMPILE_OK) {
                 JanetFunction *f = janet_thunk(cres.funcdef);
@@ -53,27 +56,30 @@ int janet_dobytes(JanetTable *env, const uint8_t *bytes, int32_t len, const char
                 JanetSignal status = janet_continue(fiber, janet_wrap_nil(), &ret);
                 if (status != JANET_SIGNAL_OK && status != JANET_SIGNAL_EVENT) {
                     janet_stacktrace_ext(fiber, ret, "");
-                    errflags |= 0x01;
+                    errflags |= JANET_DO_ERROR_RUNTIME;
                     done = 1;
                 }
             } else {
-                ret = janet_wrap_string(cres.error);
-                int32_t line = (int32_t) parser.line;
-                int32_t col = (int32_t) parser.column;
+                int32_t line = (int32_t) parser->line;
+                int32_t col = (int32_t) parser->column;
                 if ((cres.error_mapping.line > 0) &&
                         (cres.error_mapping.column > 0)) {
                     line = cres.error_mapping.line;
                     col = cres.error_mapping.column;
                 }
+                JanetString ctx = janet_formatc("%s:%d:%d: compile error",
+                                                sourcePath, line, col);
+                JanetString errstr = janet_formatc("%s: %s",
+                                                   (const char *)ctx,
+                                                   (const char *)cres.error);
+                ret = janet_wrap_string(errstr);
                 if (cres.macrofiber) {
-                    janet_eprintf("%s:%d:%d: compile error", sourcePath,
-                                  line, col);
+                    janet_eprintf("%s", (const char *)ctx);
                     janet_stacktrace_ext(cres.macrofiber, ret, "");
                 } else {
-                    janet_eprintf("%s:%d:%d: compile error: %s\n", sourcePath,
-                                  line, col, (const char *)cres.error);
+                    janet_eprintf("%s\n", (const char *)errstr);
                 }
-                errflags |= 0x02;
+                errflags |= JANET_DO_ERROR_COMPILE;
                 done = 1;
             }
         }
@@ -81,26 +87,28 @@ int janet_dobytes(JanetTable *env, const uint8_t *bytes, int32_t len, const char
         if (done) break;
 
         /* Dispatch based on parse state */
-        switch (janet_parser_status(&parser)) {
+        switch (janet_parser_status(parser)) {
             case JANET_PARSE_DEAD:
                 done = 1;
                 break;
             case JANET_PARSE_ERROR: {
-                const char *e = janet_parser_error(&parser);
-                errflags |= 0x04;
-                ret = janet_cstringv(e);
-                int32_t line = (int32_t) parser.line;
-                int32_t col = (int32_t) parser.column;
-                janet_eprintf("%s:%d:%d: parse error: %s\n", sourcePath, line, col, e);
+                errflags |= JANET_DO_ERROR_PARSE;
+                int32_t line = (int32_t) parser->line;
+                int32_t col = (int32_t) parser->column;
+                JanetString errstr = janet_formatc("%s:%d:%d: parse error: %s",
+                                                   sourcePath, line, col,
+                                                   janet_parser_error(parser));
+                ret = janet_wrap_string(errstr);
+                janet_eprintf("%s\n", (const char *)errstr);
                 done = 1;
                 break;
             }
             case JANET_PARSE_ROOT:
             case JANET_PARSE_PENDING:
                 if (index >= len) {
-                    janet_parser_eof(&parser);
+                    janet_parser_eof(parser);
                 } else {
-                    janet_parser_consume(&parser, bytes[index++]);
+                    janet_parser_consume(parser, bytes[index++]);
                 }
                 break;
         }
@@ -108,7 +116,7 @@ int janet_dobytes(JanetTable *env, const uint8_t *bytes, int32_t len, const char
     }
 
     /* Clean up and return errors */
-    janet_parser_deinit(&parser);
+    janet_gcunroot(janet_wrap_abstract(parser));
     if (where) janet_gcunroot(janet_wrap_string(where));
 #ifdef JANET_EV
     /* Enter the event loop if we are not already in it */
@@ -119,7 +127,8 @@ int janet_dobytes(JanetTable *env, const uint8_t *bytes, int32_t len, const char
         janet_loop();
         if (fiber) {
             janet_gcunroot(janet_wrap_fiber(fiber));
-            ret = fiber->last_value;
+            if (!errflags)
+                ret = fiber->last_value;
         }
     }
 #endif

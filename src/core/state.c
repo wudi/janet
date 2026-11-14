@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -58,7 +58,7 @@ void janet_vm_load(JanetVM *from) {
 }
 
 /* Trigger suspension of the Janet vm by trying to
- * exit the interpeter loop when convenient. You can optionally
+ * exit the interpreter loop when convenient. You can optionally
  * use NULL to interrupt the current VM when convenient */
 void janet_interpreter_interrupt(JanetVM *vm) {
     vm = vm ? vm : &janet_vm;

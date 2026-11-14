@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -50,6 +50,7 @@
 #endif
 
 #include <inttypes.h>
+#include <float.h>
 
 /* Base 64 lookup table for digits */
 const char janet_base64[65] =
@@ -79,6 +80,7 @@ const char *const janet_type_names[16] = {
     "pointer"
 };
 
+/* Docstring for signal lists these */
 const char *const janet_signal_names[14] = {
     "ok",
     "error",
@@ -96,6 +98,7 @@ const char *const janet_signal_names[14] = {
     "await"
 };
 
+/* Docstring for fiber/status lists these */
 const char *const janet_status_names[16] = {
     "dead",
     "error",
@@ -115,14 +118,20 @@ const char *const janet_status_names[16] = {
     "alive"
 };
 
+uint32_t janet_hash_mix(uint32_t input, uint32_t more) {
+    uint32_t mix1 = (more + 0x9e3779b9 + (input << 6) + (input >> 2));
+    return input ^ (0x9e3779b9 + (mix1 << 6) + (mix1 >> 2));
+}
+
 #ifndef JANET_PRF
 
 int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
-    if (NULL == str) return 5381;
+    if (NULL == str || len == 0) return 5381;
     const uint8_t *end = str + len;
     uint32_t hash = 5381;
     while (str < end)
         hash = (hash << 5) + hash + *str++;
+    hash = janet_hash_mix(hash, (uint32_t) len);
     return (int32_t) hash;
 }
 
@@ -238,11 +247,6 @@ int32_t janet_string_calchash(const uint8_t *str, int32_t len) {
 
 #endif
 
-uint32_t janet_hash_mix(uint32_t input, uint32_t more) {
-    uint32_t mix1 = (more + 0x9e3779b9 + (input << 6) + (input >> 2));
-    return input ^ (0x9e3779b9 + (mix1 << 6) + (mix1 >> 2));
-}
-
 /* Computes hash of an array of values */
 int32_t janet_array_calchash(const Janet *array, int32_t len) {
     const Janet *end = array + len;
@@ -265,7 +269,7 @@ int32_t janet_kv_calchash(const JanetKV *kvs, int32_t len) {
     return (int32_t) hash;
 }
 
-/* Calculate next power of 2. May overflow. If n is 0,
+/* Calculate next power of 2. May overflow. If n < 0,
  * will return 0. */
 int32_t janet_tablen(int32_t n) {
     if (n < 0) return 0;
@@ -274,7 +278,7 @@ int32_t janet_tablen(int32_t n) {
     n |= n >> 4;
     n |= n >> 8;
     n |= n >> 16;
-    return n + 1;
+    return n == INT32_MAX ? INT32_MAX : n + 1;
 }
 
 /* Avoid some undefined behavior that was common in the code base. */
@@ -283,9 +287,10 @@ void safe_memcpy(void *dest, const void *src, size_t len) {
     memcpy(dest, src, len);
 }
 
-/* Helper to find a value in a Janet struct or table. Returns the bucket
- * containing the key, or the first empty bucket if there is no such key. */
-const JanetKV *janet_dict_find(const JanetKV *buckets, int32_t cap, Janet key) {
+/* Helper to find a value in a Janet struct or table like janet_dict_find, for keys
+ * equaling stored key that is not bitwise identical to it. */
+const JanetKV *janet_dict_find_deep(const JanetKV *buckets, int32_t cap, Janet key) {
+    janet_assert(cap != 0, "bad capacity");
     int32_t index = janet_maphash(cap, janet_hash(key));
     int32_t i;
     const JanetKV *first_bucket = NULL;
@@ -298,7 +303,7 @@ const JanetKV *janet_dict_find(const JanetKV *buckets, int32_t cap, Janet key) {
             } else if (NULL == first_bucket) {
                 first_bucket = kv;
             }
-        } else if (janet_equals(kv->key, key)) {
+        } else if (janet_bitwise_same(kv->key, key) || janet_equals(kv->key, key)) {
             return buckets + i;
         }
     }
@@ -311,8 +316,108 @@ const JanetKV *janet_dict_find(const JanetKV *buckets, int32_t cap, Janet key) {
             } else if (NULL == first_bucket) {
                 first_bucket = kv;
             }
-        } else if (janet_equals(kv->key, key)) {
+        } else if (janet_bitwise_same(kv->key, key) || janet_equals(kv->key, key)) {
             return buckets + i;
+        }
+    }
+    return first_bucket;
+}
+
+/* Search the dict when we know that the key equality check is simple */
+const JanetKV *janet_dict_find_shallow(const JanetKV *buckets, int32_t cap, Janet key) {
+    janet_assert(cap != 0, "bad capacity");
+    int32_t hash;
+    /* Manual inline common case of symbol or keyword */
+    if (janet_checktype(key, JANET_KEYWORD) || janet_checktype(key, JANET_SYMBOL)) {
+        hash = janet_string_hash(janet_unwrap_string(key));
+    } else {
+        hash = janet_hash(key);
+    }
+    int32_t index = janet_maphash(cap, hash);
+    int32_t i;
+    const JanetKV *first_bucket = NULL;
+    /* Higher half */
+    for (i = index; i < cap; i++) {
+        const JanetKV *kv = buckets + i;
+        if (janet_checktype(kv->key, JANET_NIL)) {
+            if (janet_checktype(kv->value, JANET_NIL)) {
+                return kv;
+            } else if (NULL == first_bucket) {
+                first_bucket = kv;
+            }
+        } else if (janet_bitwise_same(kv->key, key)) {
+            return buckets + i;
+        }
+    }
+    /* Lower half */
+    for (i = 0; i < index; i++) {
+        const JanetKV *kv = buckets + i;
+        if (janet_checktype(kv->key, JANET_NIL)) {
+            if (janet_checktype(kv->value, JANET_NIL)) {
+                return kv;
+            } else if (NULL == first_bucket) {
+                first_bucket = kv;
+            }
+        } else if (janet_bitwise_same(kv->key, key)) {
+            return buckets + i;
+        }
+    }
+    return first_bucket;
+}
+
+#define HARD_KEY_TYPES (JANET_TFLAG_NIL | JANET_TFLAG_STRING | JANET_TFLAG_TUPLE | JANET_TFLAG_STRUCT | JANET_TFLAG_ABSTRACT)
+
+const JanetKV *janet_dict_find(const JanetKV *buckets, int32_t cap, Janet key) {
+    if (janet_checktypes(key, HARD_KEY_TYPES) || (janet_checktype(key, JANET_NUMBER) && janet_unwrap_number(key) == 0)) {
+        return janet_dict_find_deep(buckets, cap, key);
+    } else {
+        return janet_dict_find_shallow(buckets, cap, key);
+    }
+}
+
+/* Helper to find a keyword, symbol, or string in a Janet struct or table without allocating
+ * memory or needing to find interned symbols */
+const JanetKV *janet_dict_find_keyword(
+    const JanetKV *buckets, int32_t cap,
+    const uint8_t *cstr, int32_t cstr_len) {
+    int32_t hash = janet_string_calchash(cstr, cstr_len);
+    int32_t index = janet_maphash(cap, hash);
+    int32_t i;
+    const JanetKV *first_bucket = NULL;
+    /* Higher half */
+    for (i = index; i < cap; i++) {
+        const JanetKV *kv = buckets + i;
+        if (janet_checktype(kv->key, JANET_NIL)) {
+            if (janet_checktype(kv->value, JANET_NIL)) {
+                return kv;
+            } else if (NULL == first_bucket) {
+                first_bucket = kv;
+            }
+        } else if (janet_checktype(kv->key, JANET_KEYWORD)) {
+            /* Works for symbol and keyword, too */
+            JanetString str = janet_unwrap_string(kv->key);
+            int32_t len = janet_string_length(str);
+            if (hash == janet_string_hash(str) && len == cstr_len && !memcmp(str, cstr, len)) {
+                return buckets + i;
+            }
+        }
+    }
+    /* Lower half */
+    for (i = 0; i < index; i++) {
+        const JanetKV *kv = buckets + i;
+        if (janet_checktype(kv->key, JANET_NIL)) {
+            if (janet_checktype(kv->value, JANET_NIL)) {
+                return kv;
+            } else if (NULL == first_bucket) {
+                first_bucket = kv;
+            }
+        } else if (janet_checktype(kv->key, JANET_KEYWORD)) {
+            /* Works for symbol and keyword, too */
+            JanetString str = janet_unwrap_string(kv->key);
+            int32_t len = janet_string_length(str);
+            if (hash == janet_string_hash(str) && len == cstr_len && !memcmp(str, cstr, len)) {
+                return buckets + i;
+            }
         }
     }
     return first_bucket;
@@ -522,8 +627,24 @@ static char *namebuf_name(NameBuf *namebuf, const char *suffix) {
     return (char *)(namebuf->buf);
 }
 
+/* Add a little bit of safety when using nanboxing on arm. Instead of inserting run-time checks everywhere, we are
+ * only doing it during registration which has much less cost (1 shift and mask). */
+static void janet_check_pointer_align(void *p) {
+    (void) p;
+#if defined(JANET_NANBOX_64) && JANET_NANBOX_64_POINTER_SHIFT != 0
+    union {
+        void *p;
+        uintptr_t u;
+    } un;
+    un.p = p;
+    janet_assert(!(un.u & (uintptr_t)((1 << JANET_NANBOX_64_POINTER_SHIFT) - 1)),
+                 "unaligned pointer wrap - cfunction pointers and abstract types must be aligned with this nanboxing configuration.");
+#endif
+}
+
 void janet_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns) {
     while (cfuns->name) {
+        janet_check_pointer_align(cfuns->cfun);
         Janet fun = janet_wrap_cfunction(cfuns->cfun);
         if (env) janet_def(env, cfuns->name, fun, cfuns->documentation);
         janet_registry_put(cfuns->cfun, cfuns->name, regprefix, NULL, 0);
@@ -533,6 +654,7 @@ void janet_cfuns(JanetTable *env, const char *regprefix, const JanetReg *cfuns) 
 
 void janet_cfuns_ext(JanetTable *env, const char *regprefix, const JanetRegExt *cfuns) {
     while (cfuns->name) {
+        janet_check_pointer_align(cfuns->cfun);
         Janet fun = janet_wrap_cfunction(cfuns->cfun);
         if (env) janet_def_sm(env, cfuns->name, fun, cfuns->documentation, cfuns->source_file, cfuns->source_line);
         janet_registry_put(cfuns->cfun, cfuns->name, regprefix, cfuns->source_file, cfuns->source_line);
@@ -544,6 +666,7 @@ void janet_cfuns_prefix(JanetTable *env, const char *regprefix, const JanetReg *
     NameBuf nb;
     if (env) namebuf_init(&nb, regprefix);
     while (cfuns->name) {
+        janet_check_pointer_align(cfuns->cfun);
         Janet fun = janet_wrap_cfunction(cfuns->cfun);
         if (env) janet_def(env, namebuf_name(&nb, cfuns->name), fun, cfuns->documentation);
         janet_registry_put(cfuns->cfun, cfuns->name, regprefix, NULL, 0);
@@ -556,6 +679,7 @@ void janet_cfuns_ext_prefix(JanetTable *env, const char *regprefix, const JanetR
     NameBuf nb;
     if (env) namebuf_init(&nb, regprefix);
     while (cfuns->name) {
+        janet_check_pointer_align(cfuns->cfun);
         Janet fun = janet_wrap_cfunction(cfuns->cfun);
         if (env) janet_def_sm(env, namebuf_name(&nb, cfuns->name), fun, cfuns->documentation, cfuns->source_file, cfuns->source_line);
         janet_registry_put(cfuns->cfun, cfuns->name, regprefix, cfuns->source_file, cfuns->source_line);
@@ -572,6 +696,7 @@ void janet_register(const char *name, JanetCFunction cfun) {
 /* Abstract type introspection */
 
 void janet_register_abstract_type(const JanetAbstractType *at) {
+    janet_check_pointer_align((void *) at);
     Janet sym = janet_csymbolv(at->name);
     Janet check = janet_table_get(janet_vm.abstract_registry, sym);
     if (!janet_checktype(check, JANET_NIL) && at != janet_unwrap_pointer(check)) {
@@ -604,6 +729,7 @@ void janet_core_def_sm(JanetTable *env, const char *name, Janet x, const void *p
 void janet_core_cfuns_ext(JanetTable *env, const char *regprefix, const JanetRegExt *cfuns) {
     (void) regprefix;
     while (cfuns->name) {
+        janet_check_pointer_align(cfuns->cfun);
         Janet fun = janet_wrap_cfunction(cfuns->cfun);
         janet_table_put(env, janet_csymbolv(cfuns->name), fun);
         janet_registry_put(cfuns->cfun, cfuns->name, regprefix, cfuns->source_file, cfuns->source_line);
@@ -625,8 +751,11 @@ JanetBinding janet_binding_from_entry(Janet entry) {
         return binding;
     entry_table = janet_unwrap_table(entry);
 
-    /* deprecation check */
-    Janet deprecate = janet_table_get(entry_table, janet_ckeywordv("deprecated"));
+    Janet deprecate = janet_table_get_keyword(entry_table, "deprecated");
+    int macro = janet_truthy(janet_table_get_keyword(entry_table, "macro"));
+    Janet value = janet_table_get_keyword(entry_table, "value");
+    Janet ref = janet_table_get_keyword(entry_table, "ref");
+
     if (janet_checktype(deprecate, JANET_KEYWORD)) {
         JanetKeyword depkw = janet_unwrap_keyword(deprecate);
         if (!janet_cstrcmp(depkw, "relaxed")) {
@@ -640,11 +769,8 @@ JanetBinding janet_binding_from_entry(Janet entry) {
         binding.deprecation = JANET_BINDING_DEP_NORMAL;
     }
 
-    int macro = janet_truthy(janet_table_get(entry_table, janet_ckeywordv("macro")));
-    Janet value = janet_table_get(entry_table, janet_ckeywordv("value"));
-    Janet ref = janet_table_get(entry_table, janet_ckeywordv("ref"));
     int ref_is_valid = janet_checktype(ref, JANET_ARRAY);
-    int redef = ref_is_valid && janet_truthy(janet_table_get(entry_table, janet_ckeywordv("redef")));
+    int redef = ref_is_valid && janet_truthy(janet_table_get_keyword(entry_table, "redef"));
 
     if (macro) {
         binding.value = redef ? ref : value;
@@ -826,16 +952,48 @@ int janet_checkuint64(Janet x) {
     return janet_checkuint64range(dval);
 }
 
+int janet_checkint16(Janet x) {
+    if (!janet_checktype(x, JANET_NUMBER))
+        return 0;
+    double dval = janet_unwrap_number(x);
+    return janet_checkint16range(dval);
+}
+
+int janet_checkuint16(Janet x) {
+    if (!janet_checktype(x, JANET_NUMBER))
+        return 0;
+    double dval = janet_unwrap_number(x);
+    return janet_checkuint16range(dval);
+}
+
+int janet_checkint8(Janet x) {
+    if (!janet_checktype(x, JANET_NUMBER))
+        return 0;
+    double dval = janet_unwrap_number(x);
+    return janet_checkint8range(dval);
+}
+
+int janet_checkuint8(Janet x) {
+    if (!janet_checktype(x, JANET_NUMBER))
+        return 0;
+    double dval = janet_unwrap_number(x);
+    return janet_checkuint8range(dval);
+}
+
 int janet_checksize(Janet x) {
     if (!janet_checktype(x, JANET_NUMBER))
         return 0;
     double dval = janet_unwrap_number(x);
     if (dval != (double)((size_t) dval)) return 0;
+#ifdef JANET_PLAN9
+    return dval <= SIZE_MAX;
+#else
     if (SIZE_MAX > JANET_INTMAX_INT64) {
         return dval <= JANET_INTMAX_INT64;
     } else {
         return dval <= SIZE_MAX;
     }
+#endif
 }
 
 JanetTable *janet_get_core_table(const char *name) {
@@ -876,7 +1034,6 @@ int32_t janet_sorted_keys(const JanetKV *dict, int32_t cap, int32_t *index_buffe
 
     /* Return number of indices found */
     return next_index;
-
 }
 
 /* Clock shims for various platforms */
@@ -914,27 +1071,24 @@ int janet_gettime(struct timespec *spec, enum JanetTimeSource source) {
 #include <mach/clock.h>
 #include <mach/mach.h>
 int janet_gettime(struct timespec *spec, enum JanetTimeSource source) {
-    if (source == JANET_TIME_REALTIME) {
+    if (source == JANET_TIME_CPUTIME) {
+        clock_t tmp = clock();
+        spec->tv_sec = tmp / CLOCKS_PER_SEC;
+        spec->tv_nsec = ((tmp - (spec->tv_sec * CLOCKS_PER_SEC)) * 1000000000) / CLOCKS_PER_SEC;
+    } else {
         clock_serv_t cclock;
         mach_timespec_t mts;
-        host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+        clock_id_t cid = CALENDAR_CLOCK;
+        if (source == JANET_TIME_REALTIME) {
+            cid = CALENDAR_CLOCK;
+        } else if (source == JANET_TIME_MONOTONIC) {
+            cid = SYSTEM_CLOCK;
+        }
+        host_get_clock_service(mach_host_self(), cid, &cclock);
         clock_get_time(cclock, &mts);
         mach_port_deallocate(mach_task_self(), cclock);
         spec->tv_sec = mts.tv_sec;
         spec->tv_nsec = mts.tv_nsec;
-    } else if (source == JANET_TIME_MONOTONIC) {
-        clock_serv_t cclock;
-        int nsecs;
-        mach_msg_type_number_t count;
-        host_get_clock_service(mach_host_self(), clock, &cclock);
-        clock_get_attributes(cclock, CLOCK_GET_TIME_RES, (clock_attr_t)&nsecs, &count);
-        mach_port_deallocate(mach_task_self(), cclock);
-        clock_getres(CLOCK_MONOTONIC, spec);
-    }
-    if (source == JANET_TIME_CPUTIME) {
-        clock_t tmp = clock();
-        spec->tv_sec = tmp;
-        spec->tv_nsec = (tmp - spec->tv_sec) * 1.0e9;
     }
     return 0;
 }
@@ -952,6 +1106,20 @@ int janet_gettime(struct timespec *spec, enum JanetTimeSource source) {
 }
 #endif
 #endif
+
+/* Better strerror (thread-safe if available) */
+const char *janet_strerror(int e) {
+#ifdef JANET_WINDOWS
+    /* Microsoft strerror seems sane here and is thread safe by default */
+    return strerror(e);
+#elif defined(__GLIBC__)
+    /* See https://linux.die.net/man/3/strerror_r */
+    return strerror_r(e, janet_vm.strerror_buf, sizeof(janet_vm.strerror_buf));
+#else
+    strerror_r(e, janet_vm.strerror_buf, sizeof(janet_vm.strerror_buf));
+    return janet_vm.strerror_buf;
+#endif
+}
 
 /* Setting C99 standard makes this not available, but it should
  * work/link properly if we detect a BSD */
@@ -1096,4 +1264,11 @@ void *(janet_calloc)(size_t nmemb, size_t size) {
 
 void *(janet_realloc)(void *ptr, size_t size) {
     return janet_realloc(ptr, size);
+}
+
+/* Avoid overflow and underflow, especially on 32-bit systems */
+void *array_allocate(size_t element_size, int32_t count) {
+    if (count < 0) return NULL;
+    if ((size_t) count > (SIZE_MAX / element_size)) return NULL;
+    return janet_malloc(element_size * count);
 }

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2026 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -63,7 +63,16 @@
         "strftime january 2014")
 (assert (= (try (os/strftime "%%%d%t") ([err] err))
            "invalid conversion specifier '%t'")
-        "invalid conversion specifier")
+        "invalid conversion specifier 1")
+(assert (= (try (os/strftime "%H:%M:%") ([err] err))
+           "invalid conversion specifier")
+        "invalid conversion specifier 2")
+# strftime leaves its buffer indeterminate when the result does not fit,
+# so an oversized result must not be read back with strlen.
+(assert (= (os/strftime (string/repeat "a" 249) 0) (string/repeat "a" 249))
+        "strftime result that fills the buffer")
+(assert (= (os/strftime (string/repeat "%Y" 200) 0) "")
+        "strftime result too long for the buffer")
 
 # 07db4c530
 (os/setenv "TESTENV1" "v1")
@@ -96,10 +105,22 @@
   (assert (= (in buf 0) 0) "cryptorand doesn't overwrite buffer")
   (assert (= (length buf) 2) "cryptorand appends to buffer"))
 
+(assert-no-error "realtime clock" (os/clock))
+(assert-no-error "realtime clock" (os/clock nil))
+(assert-no-error "realtime clock" (os/clock nil nil))
+
 # 80db68210
 (assert-no-error "realtime clock" (os/clock :realtime))
 (assert-no-error "cputime clock" (os/clock :cputime))
 (assert-no-error "monotonic clock" (os/clock :monotonic))
+
+(assert-no-error "realtime clock double output" (os/clock nil :double))
+(assert-no-error "realtime clock int output" (os/clock nil :int))
+(assert-no-error "realtime clock tuple output" (os/clock nil :tuple))
+
+(assert-error "invalid clock" (os/clock :a))
+(assert-error "invalid output" (os/clock :realtime :b))
+(assert-error "invalid clock and output" (os/clock :a :b))
 
 (def before (os/clock :monotonic))
 (def after (os/clock :monotonic))
@@ -119,11 +140,25 @@
 (assert (= (os/perm-string 8r755) "rwxr-xr-x") "perm 8")
 (assert (= (os/perm-string 8r644) "rw-r--r--") "perm 9")
 
+# Pipes
+(assert-no-error (os/pipe))
+(assert-no-error (os/pipe :RW))
+(assert-no-error (os/pipe :R))
+(assert-no-error (os/pipe :W))
+
 # os/execute with environment variables
 # issue #636 - 7e2c433ab
 (assert (= 0 (os/execute [;run janet "-e" "(+ 1 2 3)"] :pe
                          (merge (os/environ) {"HELLO" "WORLD"})))
         "os/execute with env")
+
+# os/execute with empty environment
+# pr #1686
+# native MinGW can't find system DLLs without PATH, SystemRoot, etc. and so fails
+# Also fails for address sanitizer builds on windows.
+(def result (os/execute [;run janet "-e" "(+ 1 2 3)"] :pe {}))
+(assert (or (= result -1073741515) (= result 0))
+        "os/execute with minimal env")
 
 # os/execute regressions
 # 427f7c362
@@ -147,5 +182,27 @@
                                :px
                                {:out dn :err dn})))
 
-(end-suite)
+# os/execute IO redirection with more windows flags
+(assert-no-error "IO redirection more windows flags"
+                 (defn devnull []
+                   (def os (os/which))
+                   (def path (if (or (= os :mingw) (= os :windows))
+                               "NUL"
+                               "/dev/null"))
+                   (os/open path (if (= os :windows) :wWI :wW)))
+                 (with [dn (devnull)]
+                   (os/execute [;run janet
+                                "-e"
+                                "(print :foo) (eprint :bar)"]
+                               :px
+                               {:out dn :err dn})))
 
+# Issue 16922
+(assert-error "os/realpath errors when path does not exist"
+              (os/realpath "abc123def456"))
+
+# os/which changes
+(assert (os/which (os/which)) "os/which 1 arg")
+(assert (not (os/which :gobbledegook)) "os/which 2")
+
+(end-suite)

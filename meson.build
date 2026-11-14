@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose and contributors
+# Copyright (c) 2026 Calvin Rose and contributors
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -20,16 +20,34 @@
 
 project('janet', 'c',
   default_options : ['c_std=c99', 'build.c_std=c99', 'b_lundef=false', 'default_library=both'],
-  version : '1.32.1')
+  version : '1.43.0')
 
 # Global settings
 janet_path = join_paths(get_option('prefix'), get_option('libdir'), 'janet')
 header_path = join_paths(get_option('prefix'), get_option('includedir'), 'janet')
 
-# Link math library on all systems
+# Compilers
 cc = meson.get_compiler('c')
+native_cc = meson.get_compiler('c', native : true)
+
+# Native deps
+native_m_dep = native_cc.find_library('m', required : false)
+native_dl_dep = native_cc.find_library('dl', required : false)
+native_android_spawn_dep = native_cc.find_library('android-spawn', required : false)
+native_thread_dep = dependency('threads', native : true)
+
+# Deps
 m_dep = cc.find_library('m', required : false)
 dl_dep = cc.find_library('dl', required : false)
+
+# for MINGW/MSYS2
+native_ws2_dep = native_cc.find_library('ws2_32', required: false)
+native_psapi_dep = native_cc.find_library('psapi', required: false)
+native_wsock_dep = native_cc.find_library('wsock32', required: false)
+ws2_dep = cc.find_library('ws2_32', required: false)
+psapi_dep = cc.find_library('psapi', required: false)
+wsock_dep = cc.find_library('wsock32', required: false)
+
 android_spawn_dep = cc.find_library('android-spawn', required : false)
 thread_dep = dependency('threads')
 
@@ -54,6 +72,9 @@ conf.set_quoted('JANET_VERSION', meson.project_version())
 # Use options
 conf.set_quoted('JANET_BUILD', get_option('git_hash'))
 conf.set('JANET_NO_NANBOX', not get_option('nanbox'))
+if get_option('nanbox_pointer_shift') != -1 # -1 is auto-detect
+  conf.set('JANET_NANBOX_64_POINTER_SHIFT', get_option('nanbox_pointer_shift'))
+endif
 conf.set('JANET_SINGLE_THREADED', get_option('single_threaded'))
 conf.set('JANET_NO_DYNAMIC_MODULES', not get_option('dynamic_modules'))
 conf.set('JANET_NO_DOCSTRINGS', not get_option('docstrings'))
@@ -79,12 +100,16 @@ conf.set('JANET_EV_NO_KQUEUE', not get_option('kqueue'))
 conf.set('JANET_NO_INTERPRETER_INTERRUPT', not get_option('interpreter_interrupt'))
 conf.set('JANET_NO_FFI', not get_option('ffi'))
 conf.set('JANET_NO_FFI_JIT', not get_option('ffi_jit'))
+conf.set('JANET_NO_FILEWATCH', not get_option('filewatch'))
 conf.set('JANET_NO_CRYPTORAND', not get_option('cryptorand'))
 if get_option('os_name') != ''
   conf.set('JANET_OS_NAME', get_option('os_name'))
 endif
 if get_option('arch_name') != ''
   conf.set('JANET_ARCH_NAME', get_option('arch_name'))
+endif
+if get_option('thread_local_prefix') != ''
+  conf.set('JANET_THREAD_LOCAL', get_option('thread_local_prefix'))
 endif
 jconf = configure_file(output : 'janetconf.h',
   configuration : conf)
@@ -122,6 +147,7 @@ core_src = [
   'src/core/ev.c',
   'src/core/ffi.c',
   'src/core/fiber.c',
+  'src/core/filewatch.c',
   'src/core/gc.c',
   'src/core/inttypes.c',
   'src/core/io.c',
@@ -162,11 +188,18 @@ mainclient_src = [
   'src/mainclient/shell.c'
 ]
 
+janet_dependencies = [m_dep, dl_dep, android_spawn_dep, ws2_dep, psapi_dep, wsock_dep]
+janet_native_dependencies = [native_m_dep, native_dl_dep, native_android_spawn_dep, native_ws2_dep, native_psapi_dep, native_wsock_dep]
+if not get_option('single_threaded')
+  janet_dependencies += thread_dep
+  janet_native_dependencies += native_thread_dep
+endif
+
 # Build boot binary
 janet_boot = executable('janet-boot', core_src, boot_src,
   include_directories : incdir,
   c_args : '-DJANET_BOOTSTRAP',
-  dependencies : [m_dep, dl_dep, thread_dep, android_spawn_dep],
+  dependencies : janet_native_dependencies,
   native : true)
 
 # Build janet.c
@@ -178,11 +211,6 @@ janetc = custom_target('janetc',
     janet_boot, meson.current_source_dir(),
     'JANET_PATH', janet_path
   ])
-
-janet_dependencies = [m_dep, dl_dep, android_spawn_dep]
-if not get_option('single_threaded')
-  janet_dependencies += thread_dep
-endif
 
 # Allow building with no shared library
 if cc.has_argument('-fvisibility=hidden')
@@ -229,7 +257,7 @@ if meson.is_cross_build()
   endif
   janet_nativeclient = executable('janet-native', janetc, mainclient_src,
     include_directories : incdir,
-    dependencies : janet_dependencies,
+    dependencies : janet_native_dependencies,
     c_args : extra_native_cflags,
     native : true)
 else
@@ -249,17 +277,21 @@ test_files = [
   'test/suite-asm.janet',
   'test/suite-boot.janet',
   'test/suite-buffer.janet',
+  'test/suite-bundle.janet',
   'test/suite-capi.janet',
   'test/suite-cfuns.janet',
   'test/suite-compile.janet',
   'test/suite-corelib.janet',
   'test/suite-debug.janet',
   'test/suite-ev.janet',
+  'test/suite-ev2.janet',
   'test/suite-ffi.janet',
+  'test/suite-filewatch.janet',
   'test/suite-inttypes.janet',
   'test/suite-io.janet',
   'test/suite-marsh.janet',
   'test/suite-math.janet',
+  'test/suite-net.janet',
   'test/suite-os.janet',
   'test/suite-parse.janet',
   'test/suite-peg.janet',
@@ -270,6 +302,7 @@ test_files = [
   'test/suite-struct.janet',
   'test/suite-symcache.janet',
   'test/suite-table.janet',
+  'test/suite-tuple.janet',
   'test/suite-unknown.janet',
   'test/suite-value.janet',
   'test/suite-vm.janet'

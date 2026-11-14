@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2026 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -46,7 +46,6 @@
 (assert (deep= (array/remove @[1 2 3 4 5] 2 200) @[1 2]) "array/remove 3")
 (assert (deep= (array/remove @[1 2 3 4 5] -2 200) @[1 2 3]) "array/remove 4")
 
-
 # array/peek
 (assert (nil? (array/peek @[])) "array/peek empty")
 
@@ -71,11 +70,26 @@
 (assert (= (array/pop @[]) nil) "array/pop empty")
 
 # Code coverage
-(def a @[1])
-(array/pop a)
-(array/trim a)
+(def a1 @[1])
+(array/pop a1)
+(array/trim a1)
 (array/ensure @[1 1] 6 2)
 
+# array/join
+(assert (deep= @[1 2 3] (array/join @[] [1] [2] [3])) "array/join 1")
+(assert (deep= @[] (array/join @[])) "array/join 2")
+(assert (deep= @[1 :a :b :c] (array/join @[1] @[:a :b] [] [:c])) "array/join 3")
+(assert (deep= @[:x :y :z "abc123" "def456"] (array/join @[:x :y :z] ["abc123" "def456"])) "array/join 4")
+(assert-error "array/join error 1" (array/join))
+(assert-error "array/join error 2" (array/join []))
+(assert-error "array/join error 3" (array/join [] "abc123"))
+(assert-error "array/join error 4" (array/join @[] "abc123"))
+(assert-error "array/join error 5" (array/join @[] "abc123"))
+
+# Regression 1714
+(repeat 10
+  (assert (deep= (put @[] 100 10) (put (seq [_ :range [0 101]] nil) 100 10)) "regression 1714")
+  (assert (deep= (put @[] 200 10) (put (seq [_ :range [0 201]] nil) 200 10)) "regression 1714"))
 
 (end-suite)
 

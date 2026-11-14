@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2026 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -57,6 +57,8 @@
     (for i (+ index 1) (+ index indent 1)
       (case (get text i)
         nil (break)
+        (chr "\r") (if-not (= (chr "\n") (get text (inc i)))
+                     (set rewrite false))
         (chr "\n") (break)
         (chr " ") nil
         (set rewrite false))))
@@ -64,12 +66,17 @@
   # Only re-indent if no dedented characters.
   (def str
     (if rewrite
-      (peg/replace-all ~(* "\n" (between 0 ,indent " ")) "\n" text)
+      (peg/replace-all ~(* '(* (? "\r") "\n") (between 0 ,indent " "))
+                      (fn [_mtch eol] eol) text)
       text))
 
-  (def first-nl (= (chr "\n") (first str)))
-  (def last-nl (= (chr "\n") (last str)))
-  (string/slice str (if first-nl 1 0) (if last-nl -2)))
+  (def first-eol (cond
+                   (string/has-prefix? "\r\n" str) :crlf
+                   (string/has-prefix? "\n" str) :lf))
+  (def last-eol (cond
+                  (string/has-suffix? "\r\n" str) :crlf
+                  (string/has-suffix? "\n" str) :lf))
+  (string/slice str (case first-eol :crlf 2 :lf 1 0) (case last-eol :crlf -3 :lf -2)))
 
 (defn reindent-reference
   "Same as reindent but use parser functionality. Useful for
@@ -89,8 +96,10 @@
   (let [a (reindent text indent)
         b (reindent-reference text indent)]
     (assert (= a b)
-            (string "indent " indent-counter " (indent=" indent ")"))))
+            (string/format "reindent: %q, parse: %q (indent-test #%d with indent of %d)" a b indent-counter indent)
+            )))
 
+# Unix EOLs
 (check-indent "" 0)
 (check-indent "\n" 0)
 (check-indent "\n" 1)
@@ -106,6 +115,17 @@
 (check-indent "\n    Hello, world!\n    " 4)
 (check-indent "\n    Hello, world!\n   dedented text\n    " 4)
 (check-indent "\n    Hello, world!\n    indented text\n    " 4)
+# Windows EOLs
+(check-indent "\r\n" 0)
+(check-indent "\r\n" 1)
+(check-indent "\r\n\r\n" 0)
+(check-indent "\r\n\r\n" 1)
+(check-indent "\r\nHello, world!" 0)
+(check-indent "\r\nHello, world!" 1)
+(check-indent "\r\n    Hello, world!\r\n   " 4)
+(check-indent "\r\n    Hello, world!\r\n    " 4)
+(check-indent "\r\n    Hello, world!\r\n   dedented text\r\n    " 4)
+(check-indent "\r\n    Hello, world!\r\n    indented text\r\n    " 4)
 
 # Symbols with @ character
 # d68eae9
@@ -118,13 +138,13 @@
 
 # Parser clone
 # 43520ac67
-(def p (parser/new))
-(assert (= 7 (parser/consume p "(1 2 3 ")) "parser 1")
-(def p2 (parser/clone p))
+(def p0 (parser/new))
+(assert (= 7 (parser/consume p0 "(1 2 3 ")) "parser 1")
+(def p2 (parser/clone p0))
 (parser/consume p2 ") 1 ")
-(parser/consume p ") 1 ")
-(assert (deep= (parser/status p) (parser/status p2)) "parser 2")
-(assert (deep= (parser/state p) (parser/state p2)) "parser 3")
+(parser/consume p0 ") 1 ")
+(assert (deep= (parser/status p0) (parser/status p2)) "parser 2")
+(assert (deep= (parser/state p0) (parser/state p2)) "parser 3")
 
 # Parser errors
 # 976dfc719
@@ -157,13 +177,13 @@
 (def p1 (parser/new))
 (parser/state p1)
 (parser/consume p1 step1)
-(loop [v :iterate (parser/produce p1)])
+(loop [_ :iterate (parser/produce p1)])
 (parser/state p1)
-(def p2 (parser/clone p1))
-(parser/state p2)
-(parser/consume p2 step2)
-(loop [v :iterate (parser/produce p2)])
-(parser/state p2)
+(def p3 (parser/clone p1))
+(parser/state p3)
+(parser/consume p3 step2)
+(loop [_ :iterate (parser/produce p3)])
+(parser/state p3)
 
 # parser delimiter errors
 (defn test-error [delim fmt]
@@ -182,11 +202,20 @@
 (parser/consume p ")")
 (assert (= (parser/produce p) ["hello"]))
 
-(def p (parser/new))
-(parser/consume p `("hel`)
-(parser/insert p `lo`)
-(parser/consume p `")`)
-(assert (= (parser/produce p) ["hello"]))
+(def p4 (parser/new))
+(parser/consume p4 `("hel`)
+(parser/insert p4 `lo`)
+(parser/consume p4 `")`)
+(assert (= (parser/produce p4) ["hello"]))
+
+# Hex floats
+(assert (= math/pi +0x1.921fb54442d18p+0001))
+(assert (= math/int-max +0x1.ffff_ffff_ffff_ffp+0052))
+(assert (= math/int-min -0x1.ffff_ffff_ffff_ffp+0052))
+(assert (= 1 0x1P0))
+(assert (= 2 0x1P1))
+(assert (= -2 -0x1p1))
+(assert (= -0.5 -0x1p-1))
 
 (end-suite)
 

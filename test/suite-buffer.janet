@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2026 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -48,8 +48,8 @@
 
 (assert (deep= (buffer/push @"AA" @"BB") @"AABB") "buffer/push buffer")
 (assert (deep= (buffer/push @"AA" 66 66) @"AABB") "buffer/push int")
-(def b @"AA")
-(assert (deep= (buffer/push b b) @"AAAA") "buffer/push buffer self")
+(def b1 @"AA")
+(assert (deep= (buffer/push b1 b1) @"AAAA") "buffer/push buffer self")
 
 # buffer/push-byte
 (assert (deep= (buffer/push-byte @"AA" 66) @"AAB") "buffer/push-byte")
@@ -77,6 +77,48 @@
 (buffer/push-string b5 "456" @"789")
 (assert (= "123456789" (string b5)) "buffer/push-buffer 2")
 
+(def buffer-uint16-be @"")
+(buffer/push-uint16 buffer-uint16-be :be 0x0102)
+(assert (= "\x01\x02" (string buffer-uint16-be)) "buffer/push-uint16 big endian")
+
+(def buffer-uint16-le @"")
+(buffer/push-uint16 buffer-uint16-le :le 0x0102)
+(assert (= "\x02\x01" (string buffer-uint16-le)) "buffer/push-uint16 little endian")
+
+(def buffer-uint16-max @"")
+(buffer/push-uint16 buffer-uint16-max :be 0xFFFF)
+(assert (= "\xff\xff" (string buffer-uint16-max)) "buffer/push-uint16 max")
+(assert-error "too large" (buffer/push-uint16 @"" 0x1FFFF))
+(assert-error "too small" (buffer/push-uint16 @"" -0x1))
+
+(def buffer-uint32-be @"")
+(buffer/push-uint32 buffer-uint32-be :be 0x01020304)
+(assert (= "\x01\x02\x03\x04" (string buffer-uint32-be)) "buffer/push-uint32 big endian")
+
+(def buffer-uint32-le @"")
+(buffer/push-uint32 buffer-uint32-le :le 0x01020304)
+(assert (= "\x04\x03\x02\x01" (string buffer-uint32-le)) "buffer/push-uint32 little endian")
+
+(def buffer-uint32-max @"")
+(buffer/push-uint32 buffer-uint32-max :be 0xFFFFFFFF)
+(assert (= "\xff\xff\xff\xff" (string buffer-uint32-max)) "buffer/push-uint32 max")
+
+(def buffer-float32-be @"")
+(buffer/push-float32 buffer-float32-be :be 1.234)
+(assert (= "\x3f\x9d\xf3\xb6" (string buffer-float32-be)) "buffer/push-float32 big endian")
+
+(def buffer-float32-le @"")
+(buffer/push-float32 buffer-float32-le :le 1.234)
+(assert (= "\xb6\xf3\x9d\x3f" (string buffer-float32-le)) "buffer/push-float32 little endian")
+
+(def buffer-float64-be @"")
+(buffer/push-float64 buffer-float64-be :be 1.234)
+(assert (= "\x3f\xf3\xbe\x76\xc8\xb4\x39\x58" (string buffer-float64-be)) "buffer/push-float64 big endian")
+
+(def buffer-float64-le @"")
+(buffer/push-float64 buffer-float64-le :le 1.234)
+(assert (= "\x58\x39\xb4\xc8\x76\xbe\xf3\x3f" (string buffer-float64-le)) "buffer/push-float64 little endian")
+
 # Buffer from bytes
 (assert (deep= @"" (buffer/from-bytes)) "buffer/from-bytes 1")
 (assert (deep= @"ABC" (buffer/from-bytes 65 66 67)) "buffer/from-bytes 2")
@@ -103,8 +145,8 @@
 
 # Regression #301
 # a3d4ecddb
-(def b (buffer/new-filled 128 0x78))
-(assert (= 38 (length (buffer/blit @"" b -1 90))) "buffer/blit 1")
+(def b8 (buffer/new-filled 128 0x78))
+(assert (= 38 (length (buffer/blit @"" b8 -1 90))) "buffer/blit 1")
 
 (def a @"abcdefghijklm")
 (assert (deep= @"abcde" (buffer/blit @"" a -1 0 5)) "buffer/blit 2")
@@ -121,6 +163,33 @@
         "buffer/push-at 2")
 (assert (deep= @"abc423" (buffer/push-at @"abc123" 3 "4"))
         "buffer/push-at 3")
+
+# buffer/format-at
+(def start-buf (buffer/new-filled 100 (chr "x")))
+(buffer/format-at start-buf 50 "aa%dbb" 32)
+(assert (= (string start-buf) (string (string/repeat "x" 50) "aa32bb"  (string/repeat "x" 44)))
+        "buffer/format-at 1")
+(assert
+  (deep=
+    (buffer/format @"" "%j" [1 2 3 :a :b :c])
+    (buffer/format-at @"" 0 "%j" [1 2 3 :a :b :c]))
+  "buffer/format-at empty buffer")
+(def buf @"xxxyyy")
+(buffer/format-at buf -4 "xxx")
+(assert (= (string buf) "xxxxxx") "buffer/format-at negative index")
+(assert-error "expected index at to be in range [0, 0), got 1" (buffer/format-at @"" 1 "abc"))
+
+# buffer/format with %s of the destination buffer itself. The buffer is
+# sized so appending its own contents forces a reallocation mid-copy.
+(def self-buf (buffer/new 9))
+(buffer/push self-buf "abcdefgh")
+(buffer/format self-buf "%s" self-buf)
+(assert (= (string self-buf) "abcdefghabcdefgh") "buffer/format %s self")
+
+# Regression 1714
+(repeat 10
+  (assert (deep= (put @"" 100 10) (put (buffer (string/repeat "\0" 101)) 100 10)) "regression 1714")
+  (assert (deep= (put @"" 200 10) (put (buffer (string/repeat "\0" 201)) 200 10)) "regression 1714"))
 
 (end-suite)
 

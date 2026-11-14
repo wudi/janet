@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -24,6 +24,7 @@
 #include "features.h"
 #include <janet.h>
 #include "util.h"
+#include "compile.h"
 #endif
 
 #include <setjmp.h>
@@ -495,7 +496,6 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
     int32_t count, i;
     const Janet *arr;
     Janet x;
-    (void) flags;
 
     /* Initialize funcdef */
     def = janet_funcdef_alloc();
@@ -560,9 +560,19 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
     x = janet_get1(s, janet_ckeywordv("vararg"));
     if (janet_truthy(x)) def->flags |= JANET_FUNCDEF_FLAG_VARARG;
 
+    /* Initialize slotcount */
+    def->slotcount = !!(def->flags & JANET_FUNCDEF_FLAG_VARARG) + def->arity;
+
     /* Check structarg */
     x = janet_get1(s, janet_ckeywordv("structarg"));
     if (janet_truthy(x)) def->flags |= JANET_FUNCDEF_FLAG_STRUCTARG;
+
+    /* Check namedarg */
+    x = janet_get1(s, janet_ckeywordv("namedargs"));
+    if (janet_checkint(x)) {
+        def->flags |= JANET_FUNCDEF_FLAG_NAMEDARGS;
+        def->named_args_count = janet_unwrap_integer(x);
+    }
 
     /* Check source */
     x = janet_get1(s, janet_ckeywordv("source"));
@@ -593,7 +603,7 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
     x = janet_get1(s, janet_ckeywordv("constants"));
     if (janet_indexed_view(x, &arr, &count)) {
         def->constants_length = count;
-        def->constants = janet_malloc(sizeof(Janet) * (size_t) count);
+        def->constants = array_allocate(sizeof(Janet), count);
         if (NULL == def->constants) {
             JANET_OUT_OF_MEMORY;
         }
@@ -657,7 +667,7 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
         }
         /* Allocate bytecode array */
         def->bytecode_length = blength;
-        def->bytecode = janet_malloc(sizeof(uint32_t) * (size_t) blength);
+        def->bytecode = array_allocate(sizeof(uint32_t), blength);
         if (NULL == def->bytecode) {
             JANET_OUT_OF_MEMORY;
         }
@@ -711,6 +721,9 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
                 janet_asm_error(&a, "expected tuple");
             }
             tup = janet_unwrap_tuple(entry);
+            if (janet_tuple_length(tup) < 2) {
+                janet_asm_error(&a, "sourcemap entry must have 2 elements");
+            }
             if (!janet_checkint(tup[0])) {
                 janet_asm_error(&a, "expected integer");
             }
@@ -741,6 +754,9 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
                 janet_asm_error(&a, "expected tuple");
             }
             tup = janet_unwrap_tuple(entry);
+            if (janet_tuple_length(tup) < 4) {
+                janet_asm_error(&a, "symbolmap entry must have 4 elements");
+            }
             if (janet_keyeq(tup[0], "upvalue")) {
                 ss.birth_pc = UINT32_MAX;
             } else if (!janet_checkint(tup[0])) {
@@ -784,8 +800,22 @@ static JanetAssembleResult janet_asm1(JanetAssembler *parent, Janet source, int 
     }
 
     /* Verify the func def */
-    if (janet_verify(def)) {
-        janet_asm_error(&a, "invalid assembly");
+    int verify_status = janet_verify(def);
+    if (verify_status) {
+        janet_asm_errorv(&a, janet_formatc("invalid assembly (%d)", verify_status));
+    }
+
+    /* Optionally do optimization and a second verify step */
+    if (flags & JANET_ASSEMBLE_FLAG_OPTIMIZE) {
+        int32_t optimization_level = 1; /* Use :o1, :o2, etc. for optimization levels */
+        if (flags & 0x2) optimization_level = 1;
+        if (flags & 0x4) optimization_level = 2;
+        if (flags & 0x8) optimization_level = 3;
+        janet_bytecode_optimize(def, optimization_level);
+        int verify_status = janet_verify(def);
+        if (verify_status) {
+            janet_asm_errorv(&a, janet_formatc("invalid assembly after optimization (%d)", verify_status));
+        }
     }
 
     /* Add final flags */
@@ -978,6 +1008,14 @@ static Janet janet_disasm_structarg(JanetFuncDef *def) {
     return janet_wrap_boolean(def->flags & JANET_FUNCDEF_FLAG_STRUCTARG);
 }
 
+static Janet janet_disasm_namedargs(JanetFuncDef *def) {
+    if (def->flags & JANET_FUNCDEF_FLAG_NAMEDARGS) {
+        return janet_wrap_integer(def->named_args_count);
+    } else {
+        return janet_wrap_nil();
+    }
+}
+
 static Janet janet_disasm_constants(JanetFuncDef *def) {
     JanetArray *constants = janet_array(def->constants_length);
     for (int32_t i = 0; i < def->constants_length; i++) {
@@ -1028,6 +1066,7 @@ Janet janet_disasm(JanetFuncDef *def) {
     janet_table_put(ret, janet_ckeywordv("source"), janet_disasm_source(def));
     janet_table_put(ret, janet_ckeywordv("vararg"), janet_disasm_vararg(def));
     janet_table_put(ret, janet_ckeywordv("structarg"), janet_disasm_structarg(def));
+    janet_table_put(ret, janet_ckeywordv("namedargs"), janet_disasm_namedargs(def));
     janet_table_put(ret, janet_ckeywordv("name"), janet_disasm_name(def));
     janet_table_put(ret, janet_ckeywordv("slotcount"), janet_disasm_slotcount(def));
     janet_table_put(ret, janet_ckeywordv("symbolmap"), janet_disasm_symbolslots(def));
@@ -1039,14 +1078,20 @@ Janet janet_disasm(JanetFuncDef *def) {
 }
 
 JANET_CORE_FN(cfun_asm,
-              "(asm assembly)",
+              "(asm assembly &opt flags)",
               "Returns a new function that is the compiled result of the assembly.\n"
               "The syntax for the assembly can be found on the Janet website, and should correspond\n"
               "to the return value of disasm. Will throw an\n"
-              "error on invalid assembly.") {
-    janet_fixarity(argc, 1);
+              "error on invalid assembly. Supports a keyword `flags` to control assembly.\n"
+              "The only supported flag is `:o`, which will optimize bytecode automatically.") {
+    janet_sandbox_assert(JANET_SANDBOX_ASM);
+    janet_arity(argc, 1, 2);
+    uint64_t flags = 0;
+    if (argc >= 2) {
+        flags = janet_getflags(argv, 1, "o123");
+    }
     JanetAssembleResult res;
-    res = janet_asm(argv[0], 0);
+    res = janet_asm(argv[0], (int32_t) flags);
     if (res.status != JANET_ASSEMBLE_OK) {
         janet_panics(res.error ? res.error : janet_cstring("invalid assembly"));
     }
@@ -1063,6 +1108,8 @@ JANET_CORE_FN(cfun_disasm,
               "* :min-arity - minimum number of arguments function can be called with.\n"
               "* :max-arity - maximum number of arguments function can be called with.\n"
               "* :vararg - true if function can take a variable number of arguments.\n"
+              "* :structarg - true if function can take a variable number of arguments using the &keys option.\n"
+              "* :namedargs - if function can take a variable number of arguments using the &named option, this will be the number of named arguments.\n"
               "* :bytecode - array of parsed bytecode instructions. Each instruction is a tuple.\n"
               "* :source - name of source file that this function was compiled from.\n"
               "* :name - name of function.\n"
@@ -1072,6 +1119,7 @@ JANET_CORE_FN(cfun_disasm,
               "* :sourcemap - a mapping of each bytecode instruction to a line and column in the source file.\n"
               "* :environments - an internal mapping of which enclosing functions are referenced for bindings.\n"
               "* :defs - other function definitions that this function may instantiate.\n") {
+    janet_sandbox_assert(JANET_SANDBOX_ASM);
     janet_arity(argc, 1, 2);
     JanetFunction *f = janet_getfunction(argv, 0);
     if (argc == 2) {
@@ -1084,7 +1132,9 @@ JANET_CORE_FN(cfun_disasm,
         if (!janet_cstrcmp(kw, "name")) return janet_disasm_name(f->def);
         if (!janet_cstrcmp(kw, "vararg")) return janet_disasm_vararg(f->def);
         if (!janet_cstrcmp(kw, "structarg")) return janet_disasm_structarg(f->def);
+        if (!janet_cstrcmp(kw, "namedargs")) return janet_disasm_namedargs(f->def);
         if (!janet_cstrcmp(kw, "slotcount")) return janet_disasm_slotcount(f->def);
+        if (!janet_cstrcmp(kw, "symbolmap")) return janet_disasm_symbolslots(f->def);
         if (!janet_cstrcmp(kw, "constants")) return janet_disasm_constants(f->def);
         if (!janet_cstrcmp(kw, "sourcemap")) return janet_disasm_sourcemap(f->def);
         if (!janet_cstrcmp(kw, "environments")) return janet_disasm_environments(f->def);

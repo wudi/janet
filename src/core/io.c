@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -31,6 +31,7 @@
 
 #ifndef JANET_WINDOWS
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -40,6 +41,12 @@ static int io_file_get(void *p, Janet key, Janet *out);
 static void io_file_marshal(void *p, JanetMarshalContext *ctx);
 static void *io_file_unmarshal(JanetMarshalContext *ctx);
 static Janet io_file_next(void *p, Janet key);
+
+#ifdef JANET_WINDOWS
+#include <io.h>
+#define ftell _ftelli64
+#define fseek _fseeki64
+#endif
 
 const JanetAbstractType janet_file_type = {
     "core/file",
@@ -103,11 +110,12 @@ static int32_t checkflags(const uint8_t *str) {
     return flags;
 }
 
-static void *makef(FILE *f, int32_t flags) {
+static void *makef(FILE *f, int32_t flags, size_t bufsize) {
     JanetFile *iof = (JanetFile *) janet_abstract(&janet_file_type, sizeof(JanetFile));
     iof->file = f;
     iof->flags = flags;
-#ifndef JANET_WINDOWS
+    iof->vbufsize = bufsize;
+#if !(defined(JANET_WINDOWS) || defined(JANET_PLAN9))
     /* While we would like fopen to set cloexec by default (like O_CLOEXEC) with the e flag, that is
      * not standard. */
     if (!(flags & JANET_FILE_NOT_CLOSEABLE))
@@ -126,25 +134,30 @@ JANET_CORE_FN(cfun_io_temp,
     // XXX use mkostemp when we can to avoid CLOEXEC race.
     FILE *tmp = tmpfile();
     if (!tmp)
-        janet_panicf("unable to create temporary file - %s", strerror(errno));
+        janet_panicf("unable to create temporary file - %s", janet_strerror(errno));
     return janet_makefile(tmp, JANET_FILE_WRITE | JANET_FILE_READ | JANET_FILE_BINARY);
 }
 
 JANET_CORE_FN(cfun_io_fopen,
               "(file/open path &opt mode buffer-size)",
               "Open a file. `path` is an absolute or relative path, and "
-              "`mode` is a set of flags indicating the mode to open the file in. "
-              "`mode` is a keyword where each character represents a flag. If the file "
-              "cannot be opened, returns nil, otherwise returns the new file handle. "
-              "Mode flags:\n\n"
-              "* r - allow reading from the file\n\n"
-              "* w - allow writing to the file\n\n"
-              "* a - append to the file\n\n"
-              "Following one of the initial flags, 0 or more of the following flags can be appended:\n\n"
-              "* b - open the file in binary mode (rather than text mode)\n\n"
-              "* + - append to the file instead of overwriting it\n\n"
-              "* n - error if the file cannot be opened instead of returning nil\n\n"
-              "See fopen (<stdio.h>, C99) for further details.") {
+              "`mode` is a set of flags indicating the mode to open the "
+              "file in. `mode` is a keyword where each character represents "
+              "a flag. If the file cannot be opened, returns nil, otherwise "
+              "returns the new file handle. Mode flags:\n"
+              "\n"
+              "* `r` - allow reading from file\n"
+              "* `w` - allow writing to file\n"
+              "* `a` - append to file\n"
+              "\n"
+              "After one of the initial flags, 0 or more of the following "
+              "flags can be appended:\n"
+              "\n"
+              "* `b` - open file in binary mode (rather than text mode)\n"
+              "* `+` - open file for both reading and writing\n"
+              "* `n` - error if file cannot be opened instead of returning nil\n"
+              "\n"
+              "See `fopen()` (`<stdio.h>`, C99) for further details.") {
     janet_arity(argc, 1, 3);
     const uint8_t *fname = janet_getstring(argv, 0);
     const uint8_t *fmode;
@@ -158,8 +171,17 @@ JANET_CORE_FN(cfun_io_fopen,
         flags = JANET_FILE_READ;
     }
     FILE *f = fopen((const char *)fname, (const char *)fmode);
+    size_t bufsize = BUFSIZ;
     if (f != NULL) {
-        size_t bufsize = janet_optsize(argv, argc, 2, BUFSIZ);
+#if !(defined(JANET_WINDOWS) || defined(JANET_PLAN9))
+        struct stat st;
+        fstat(fileno(f), &st);
+        if (S_ISDIR(st.st_mode)) {
+            fclose(f);
+            janet_panicf("cannot open directory: %s", fname);
+        }
+#endif
+        bufsize = janet_optsize(argv, argc, 2, BUFSIZ);
         if (bufsize != BUFSIZ) {
             int result = setvbuf(f, NULL, bufsize ? _IOFBF : _IONBF, bufsize);
             if (result) {
@@ -167,8 +189,8 @@ JANET_CORE_FN(cfun_io_fopen,
             }
         }
     }
-    return f ? janet_makefile(f, flags)
-           : (flags & JANET_FILE_NONIL) ? (janet_panicf("failed to open file %s: %s", fname, strerror(errno)), janet_wrap_nil())
+    return f ? janet_wrap_abstract(makef(f, flags, bufsize))
+           : (flags & JANET_FILE_NONIL) ? (janet_panicf("failed to open file %s: %s", fname, janet_strerror(errno)), janet_wrap_nil())
            : janet_wrap_nil();
 }
 
@@ -235,9 +257,9 @@ JANET_CORE_FN(cfun_io_fread,
 
 /* Write bytes to a file */
 JANET_CORE_FN(cfun_io_fwrite,
-              "(file/write f bytes)",
-              "Writes to a file. 'bytes' must be string, buffer, or symbol. Returns the "
-              "file.") {
+              "(file/write f & bytes)",
+              "Writes to a file `f`. Each value of `bytes` must be a "
+              "string, buffer, symbol, or keyword. Returns the file.") {
     janet_arity(argc, 1, -1);
     JanetFile *iof = janet_getabstract(argv, 0, &janet_file_type);
     if (iof->flags & JANET_FILE_CLOSED)
@@ -289,7 +311,7 @@ int janet_file_close(JanetFile *file) {
     if (!(file->flags & (JANET_FILE_NOT_CLOSEABLE | JANET_FILE_CLOSED))) {
         ret = fclose(file->file);
         file->flags |= JANET_FILE_CLOSED;
-        file->file = NULL; /* NULL derefence is easier to debug then other problems */
+        file->file = NULL; /* NULL dereference is easier to debug then other problems */
         return ret;
     }
     return 0;
@@ -325,34 +347,32 @@ JANET_CORE_FN(cfun_io_fclose,
 
 /* Seek a file */
 JANET_CORE_FN(cfun_io_fseek,
-              "(file/seek f &opt whence n)",
+              "(file/seek f whence &opt n)",
               "Jump to a relative location in the file `f`. `whence` must be one of:\n\n"
               "* :cur - jump relative to the current file location\n\n"
               "* :set - jump relative to the beginning of the file\n\n"
               "* :end - jump relative to the end of the file\n\n"
-              "By default, `whence` is :cur. Optionally a value `n` may be passed "
+              "By default, `n` is 0. Optionally a value `n` may be passed "
               "for the relative number of bytes to seek in the file. `n` may be a real "
               "number to handle large files of more than 4GB. Returns the file handle.") {
     janet_arity(argc, 2, 3);
     JanetFile *iof = janet_getabstract(argv, 0, &janet_file_type);
     if (iof->flags & JANET_FILE_CLOSED)
         janet_panic("file is closed");
-    long int offset = 0;
+    int64_t offset = 0;
     int whence = SEEK_CUR;
-    if (argc >= 2) {
-        const uint8_t *whence_sym = janet_getkeyword(argv, 1);
-        if (!janet_cstrcmp(whence_sym, "cur")) {
-            whence = SEEK_CUR;
-        } else if (!janet_cstrcmp(whence_sym, "set")) {
-            whence = SEEK_SET;
-        } else if (!janet_cstrcmp(whence_sym, "end")) {
-            whence = SEEK_END;
-        } else {
-            janet_panicf("expected one of :cur, :set, :end, got %v", argv[1]);
-        }
-        if (argc == 3) {
-            offset = (long) janet_getinteger64(argv, 2);
-        }
+    const uint8_t *whence_sym = janet_getkeyword(argv, 1);
+    if (!janet_cstrcmp(whence_sym, "cur")) {
+        whence = SEEK_CUR;
+    } else if (!janet_cstrcmp(whence_sym, "set")) {
+        whence = SEEK_SET;
+    } else if (!janet_cstrcmp(whence_sym, "end")) {
+        whence = SEEK_END;
+    } else {
+        janet_panicf("expected one of :cur, :set, :end, got %v", argv[1]);
+    }
+    if (argc == 3) {
+        offset = (int64_t) janet_getinteger64(argv, 2);
     }
     if (fseek(iof->file, offset, whence)) janet_panic("error seeking file");
     return argv[0];
@@ -365,7 +385,7 @@ JANET_CORE_FN(cfun_io_ftell,
     JanetFile *iof = janet_getabstract(argv, 0, &janet_file_type);
     if (iof->flags & JANET_FILE_CLOSED)
         janet_panic("file is closed");
-    long pos = ftell(iof->file);
+    int64_t pos = ftell(iof->file);
     if (pos == -1) janet_panic("error getting position in file");
     return janet_wrap_number((double)pos);
 }
@@ -394,21 +414,36 @@ static Janet io_file_next(void *p, Janet key) {
 
 static void io_file_marshal(void *p, JanetMarshalContext *ctx) {
     JanetFile *iof = (JanetFile *)p;
-    if (ctx->flags & JANET_MARSHAL_UNSAFE) {
+    if (janet_marshal_flags(ctx) & JANET_MARSHAL_UNSAFE) {
         janet_marshal_abstract(ctx, p);
+        int fno = -1;
 #ifdef JANET_WINDOWS
-        janet_marshal_int(ctx, _fileno(iof->file));
+        if (iof->flags & JANET_FILE_NOT_CLOSEABLE) {
+            fno = _fileno(iof->file);
+        } else {
+            fno = _dup(_fileno(iof->file));
+        }
 #else
-        janet_marshal_int(ctx, fileno(iof->file));
+        if (iof->flags & JANET_FILE_NOT_CLOSEABLE) {
+            fno = fileno(iof->file);
+        } else {
+#ifdef JANET_PLAN9
+            fno = dup(fileno(iof->file), -1);
+#else
+            fno = dup(fileno(iof->file));
 #endif
+        }
+#endif
+        janet_marshal_int(ctx, fno);
         janet_marshal_int(ctx, iof->flags);
+        janet_marshal_size(ctx, iof->vbufsize);
     } else {
         janet_panic("cannot marshal file in safe mode");
     }
 }
 
 static void *io_file_unmarshal(JanetMarshalContext *ctx) {
-    if (ctx->flags & JANET_MARSHAL_UNSAFE) {
+    if (janet_unmarshal_flags(ctx) & JANET_MARSHAL_UNSAFE) {
         JanetFile *iof = janet_unmarshal_abstract(ctx, sizeof(JanetFile));
         int32_t fd = janet_unmarshal_int(ctx);
         int32_t flags = janet_unmarshal_int(ctx);
@@ -429,6 +464,11 @@ static void *io_file_unmarshal(JanetMarshalContext *ctx) {
             iof->flags = JANET_FILE_CLOSED;
         } else {
             iof->flags = flags;
+        }
+        iof->vbufsize = janet_unmarshal_size(ctx);
+        if (iof->vbufsize != BUFSIZ) {
+            int result = setvbuf(iof->file, NULL, iof->vbufsize ? _IOFBF : _IONBF, iof->vbufsize);
+            janet_assert(!result, "unmarshal setvbuf");
         }
         return iof;
     } else {
@@ -707,8 +747,15 @@ JANET_CORE_FN(cfun_io_eflush,
 void janet_dynprintf(const char *name, FILE *dflt_file, const char *format, ...) {
     va_list args;
     va_start(args, format);
-    Janet x = janet_dyn(name);
-    JanetType xtype = janet_type(x);
+    JanetType xtype;
+    Janet x;
+    if (!name || name[0] == '\0') { /* Allow NULL or empty string to just use dflt_file directly */
+        x = janet_wrap_nil();
+        xtype = JANET_NIL;
+    } else {
+        x = janet_dyn(name);
+        xtype = janet_type(x);
+    }
     switch (xtype) {
         default:
             /* Other values simply do nothing */
@@ -764,11 +811,11 @@ FILE *janet_getfile(const Janet *argv, int32_t n, int32_t *flags) {
 }
 
 JanetFile *janet_makejfile(FILE *f, int32_t flags) {
-    return makef(f, flags);
+    return makef(f, flags, BUFSIZ);
 }
 
 Janet janet_makefile(FILE *f, int32_t flags) {
-    return janet_wrap_abstract(makef(f, flags));
+    return janet_wrap_abstract(makef(f, flags, BUFSIZ));
 }
 
 JanetAbstract janet_checkfile(Janet j) {

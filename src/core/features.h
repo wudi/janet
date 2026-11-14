@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -45,6 +45,9 @@
 #ifdef __linux__
 #define _GNU_SOURCE
 #endif
+#ifdef __gnu_hurd__
+#define _GNU_SOURCE
+#endif
 
 #if defined(WIN32) || defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -75,5 +78,7 @@
 #if !__BSD_VISIBLE && (defined(__DragonFly__) || defined(__FreeBSD__))
 #define __BSD_VISIBLE 1
 #endif
+
+#define _FILE_OFFSET_BITS 64
 
 #endif

@@ -1,6 +1,193 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## 1.43.0 - 2026-11-07
+- Functions with more than 256 closures will now fail to compile instead of silently mis-compiling.
+- Many fuzzing and memory safety issues patched via LLM bug search.
+- Many fixes to `marshal` and `unmarshal` on corrupted inputs.
+- Bug fixes to `ev/thread-chan` and `ev/select` leaking GC roots in some cases
+- Add `-z` (`--do-hook`) flag to more succinctly execute bundle hooks such as "clean", "build", and "check".
+- Add `*optimize*` for some preliminary bytecode optimizations. Should slightly improve bytecode generation.
+  Set this dynamic binding to an integer between 0 and 3 to set the optimization level.
+- Expose bytecode optimization as an optional argument to the `asm` function.
+- Various documentation improvements
+
+## 1.42.1 - 2026-09-10
+- More changes to documentation.
+- Correct SONAME in Makefile
+
+## 1.42.0 - 2026-08-31
+- Add `:locale` option to `sandbox` to mask calling `os/setlocale`.
+- JANET_PATH will now be searched strictly left-to-right for modules.
+- Add `-t` (`--tool`) flag for using installed libraries as command line tools
+- Numerous documentation improvements and fixes
+- Add support for GNU/Hurd
+- Improve pretty printing layout for %M and %m modifiers to be more code-like.
+- Add filewatch support to BSD and macos.
+- Add linting support for shadowed bindings.
+- Add nanboxing support for Linux on ARM64 and turn on nanboxing by default on macos on ARM64 (aarch64).
+- ev/thread-chan deadlock bug fixed
+- Re-add removed support for non-blocking net/connect on windows with bug fixes.
+
+## 1.41.2 - 2026-02-18
+- Fix regressions in `put` for arrays and buffers.
+- Add `module/add-file-extension`
+- Add `module/add-syspath`
+- Fix issue with possible stack corrpution with abstract types that modify the current fiber.
+- Allow use of the interpreter and garbage collection inside module entry for native modules.
+
+## 1.41.1 - 2026-02-15
+- Revert to blocking behaior of `net/connect` on windows to fix spurious errors.
+- Allow overriding the loader when doing imports with the `:loader` argument.
+- Allow importing modules with a path extension to do what one would expect.
+- Add `find-all` argument to `module/find`
+- Add :threads, :unmarshal, :compiler, and :asm sandbox flags.
+- Add support for persistent REPL history with the environment variable `JANET_HISTFILE`
+- Fix a number of fuzzer-found compiler bugs
+- Fix windows processes launching bug with empty environment table that caused process-launch failures.
+- Add `:I`, `:V`, and `:N` flags to `os/open` for more control when creating streams.
+- Add `ev/go-gather` for a dynamic `ev/gather`.
+- Use color in script output if color is being used in REPL output.
+- Fix `varfn` macros handling of extra metadata.
+- Disallow certain degenerate uses of fibers with the ev/ module.
+- Add linting for unused bindings.
+- Add linting for extra or wrong parameters to &named functions.
+- Add `janet_optuinteger` and `janet_optuinteger64` to the C API.
+- Add `cms` combinator to PEGs.
+- Add `thaw-keep-keys` as a variant of thaw
+- The `repl` function now respects the `*repl-prompt*` dynamic binding by default.
+- Allow matching exact lengths of datastructures with the `match` macro using a dollar suffix.
+- Add initial support for Plan 9. Some modules (e.g. ev) are not yet enabled.
+- Allow specifying `:flycheck` for individual defines to annotate that they are safe to evaluate for flychecking.
+
+## 1.40.1 - 2025-11-16
+- Fix `JANET_REDUCED_OS` build regression caused by `os/posix-chroot`.
+- Code formatting
+
+## 1.40.0 - 2025-11-15
+- Add `os/posix-chroot`
+- Fix `ev/deadline` with interrupt race condition bug on Windows.
+- Improve `flycheck` by allowing functions and macros to define their own flycheck behavior via the metadata `:flycheck`.
+- Add `*flychecking*` dynamic binding to check if inside flycheck evalutation
+- Add `gcperthread` callback for abstract types. This lets threaded abstracts have a finalizer that is called per thread, as well as a global finalizer.
+- Add `JANET_DO_ERROR_*` flags to describe the return value of `janet_dobytes` and `janet_dostring`.
+
+## 1.39.1 - 2025-08-30
+- Add support for chdir in os/spawn on older macOS versions
+- Expose channels properly in C API
+
+## 1.39.0 - 2025-08-24
+- Various bug fixes
+- Add `net/socket`
+- Add support for illumos OS
+- Raise helpful errors for incorrect arguments to `import`.
+- Allow configuring `JANET_THREAD_LOCAL` during builds to allow multi-threading on unknown compilers.
+- Make `ffi/write` append to a buffer instead of insert at 0 by default.
+- Add `os/getpid` to get the current process id.
+- Add `:out` option to `os/spawn` to be able to redirect stderr to stdout with pipes.
+  Add `interrupt?` argument to `ev/deadline` to use VM interruptions.
+
+## 1.38.0 - 2025-03-18
+- Add `bundle/replace`
+- Add CLI flags for the `bundle/` module to install and manage bundles.
+- Improve `?` peg special termination behavior
+- Add IEEE hex floats to grammar.
+- Add buffer peg literal support
+- Improve `split` peg special edge case behavior
+- Add Arm64 .msi support
+- Add `no-reuse` argument to `net/listen` to disable reusing server sockets
+- Add `struct/rawget`
+- Fix `deep=` and `deep-not=` to better handle degenerate cases with mutable table keys
+- Long strings will now dedent on `\r\n` instead of just `\n`.
+- Add `ev/to-file` for synchronous resource operations
+- Improve `file/open` error message by including path
+
+## 1.37.1 - 2024-12-05
+- Fix meson cross compilation
+- Update timeout documentation for networking APIs: timeouts raise errors and do not return nil.
+- Add `janet_addtimeout_nil(double sec);` to the C API.
+- Change string hashing.
+- Fix string equality bug.
+- Add `assertf`
+- Change how JANET_PROFILE is loaded to allow more easily customizing the environment.
+- Add `*repl-prompt*` dynamic binding to allow customizing the built in repl.
+- Add multiple path support in the `JANET_PATH` environment variables. This lets
+  user more easily import modules from many directories.
+- Add `nth` and `only-tags` PEG specials to select from sub-captures while
+  dropping the rest.
+
+## 1.36.0 - 2024-09-07
+- Improve error messages in `bundle/add*` functions.
+- Add CI testing and verify tests pass on the s390x architecture.
+- Save `:source-form` in environment entries when `*debug*` is set.
+- Add experimental `filewatch/` module for listening to file system changes on Linux and Windows.
+- Add `bundle/who-is` to query which bundle a file on disk was installed by.
+- Add `geomean` function
+- Add `:R` and `:W` flags to `os/pipe` to create blocking pipes on Posix and Windows systems.
+  These streams cannot be directly read to and written from, but can be passed to subprocesses.
+- Add `array/join`
+- Add `tuple/join`
+- Add `bundle/add-bin` to make installing scripts easier. This also establishes a packaging convention for it.
+- Fix marshalling weak tables and weak arrays.
+- Fix bug in `ev/` module that could accidentally close sockets on accident.
+- Expose C functions for constructing weak tables in janet.h
+- Let range take non-integer values.
+
+## 1.35.2 - 2024-06-16
+- Fix some documentation typos.
+- Allow using `:only` in import without quoting.
+
+## 1.35.0 - 2024-06-15
+- Add `:only` argument to `import` to allow for easier control over imported bindings.
+- Add extra optional `env` argument to `eval` and `eval-string`.
+- Allow naming function literals with a keyword. This allows better stacktraces for macros without
+  accidentally adding new bindings.
+- Add `bundle/` module for managing packages within Janet. This should replace the jpm packaging
+  format eventually and is much simpler and amenable to more complicated builds.
+- Add macros `ev/with-lock`, `ev/with-rlock`, and `ev/with-wlock` for using mutexes and rwlocks.
+- Add `with-env`
+- Add *module-make-env* dynamic binding
+- Add buffer/format-at
+- Add long form command line options for readable CLI usage
+- Fix bug with `net/accept-loop` that would sometimes miss connections.
+
+## 1.34.0 - 2024-03-22
+- Add a new (split) PEG special by @ianthehenry
+- Add buffer/push-* sized int and float by @pnelson
+- Documentation improvements: @amano-kenji, @llmII, @MaxGyver83, @pepe, @sogaiu.
+- Expose _exit to skip certain cleanup with os/exit.
+- Swap set / body order for each by @sogaiu.
+- Abort on assert failure instead of exit.
+- Fix: os/proc-wait by @llmII.
+- Fix macex1 to keep syntax location for all tuples.
+- Restore if-let tail calls.
+- Don't try and resume fibers that can't be resumed.
+- Register stream on unmarshal.
+- Fix asm roundtrip issue.
+
+## 1.33.0 - 2024-01-07
+- Add more + and * keywords to default-peg-grammar by @sogaiu.
+- Use libc strlen in janet_buffer_push_cstring by @williewillus.
+- Be a bit safer with reference counting.
+- Add support for atomic loads in Janet's atomic abstraction.
+- Fix poll event loop CPU usage issue.
+- Add ipv6, shared, and cryptorand options to meson.
+- Add more ipv6 feature detection.
+- Fix loop for forever loop.
+- Cleaned up unused NetStateConnect, fixed janet_async_end() ev refcount by @zevv.
+- Fix warnings w/ MSVC and format.
+- Fix marshal_one_env w/ JANET_MARSHAL_UNSAFE.
+- Fix `(default)`.
+- Fix cannot marshal fiber with c stackframe, in a dynamic way that is fairly conservative.
+- Fix typo for SIGALARM in os/proc-kill.
+- Prevent bytecode optimization from remove mk* instructions.
+- Fix arity typo in peg.c by @pepe.
+- Update Makefile for MinGW.
+- Fix canceling waiting fiber.
+- Add a new (sub) PEG special by @ianthehenry.
+- Fix if net/server's handler has incorrect arity.
+- Fix macex raising on ().
+
 ## 1.32.1 - 2023-10-15
 - Fix return value from C function `janet_dobytes` when called on Janet functions that yield to event loop.
 - Change C API for event loop interaction - get rid of JanetListener and instead use `janet_async_start` and `janet_async_end`.
@@ -63,7 +250,7 @@ All notable changes to this project will be documented in this file.
   See http://no-color.org/
 - Disallow using `(splice x)` in contexts where it doesn't make sense rather than silently coercing to `x`.
   Instead, raise a compiler error.
-- Change the names of `:user8` and `:user9` sigals to `:interrupt` and `:await`
+- Change the names of `:user8` and `:user9` signals to `:interrupt` and `:await`
 - Change the names of `:user8` and `:user9` fiber statuses to `:interrupted` and `:suspended`.
 - Add `ev/all-tasks` to see all currently suspended fibers.
 - Add `keep-syntax` and `keep-syntax!` functions to make writing macros easier.
@@ -234,7 +421,7 @@ All notable changes to this project will be documented in this file.
 - Add the ability to close channels with `ev/chan-close` (or `:close`).
 - Add threaded channels with `ev/thread-chan`.
 - Add `JANET_FN` and `JANET_REG` macros to more easily define C functions that export their source mapping information.
-- Add `janet_interpreter_interupt` and `janet_loop1_interrupt` to interrupt the interpreter while running.
+- Add `janet_interpreter_interrupt` and `janet_loop1_interrupt` to interrupt the interpreter while running.
 - Add `table/clear`
 - Add build option to disable the threading library without disabling all threads.
 - Remove JPM from the main Janet distribution. Instead, JPM must be installed
@@ -288,7 +475,7 @@ saving and restoring the entire VM state.
 - Sort keys in pretty printing output.
 
 ## 1.15.3 - 2021-02-28
-- Fix a fiber bug that occured in deeply nested fibers
+- Fix a fiber bug that occurred in deeply nested fibers
 - Add `unref` combinator to pegs.
 - Small docstring changes.
 
@@ -438,13 +625,13 @@ saving and restoring the entire VM state.
 - Add `symbol/slice`
 - Add `keyword/slice`
 - Allow cross compilation with Makefile.
-- Change `compare-primitve` to `cmp` and make it more efficient.
+- Change `compare-primitive` to `cmp` and make it more efficient.
 - Add `reverse!` for reversing an array or buffer in place.
 - `janet_dobytes` and `janet_dostring` return parse errors in \*out
 - Add `repeat` macro for iterating something n times.
 - Add `eachy` (each yield) macro for iterating a fiber.
 - Fix `:generate` verb in loop macro to accept non symbols as bindings.
-- Add `:h`, `:h+`, and `:h*` in `default-peg-grammar` for hexidecimal digits.
+- Add `:h`, `:h+`, and `:h*` in `default-peg-grammar` for hexadecimal digits.
 - Fix `%j` formatter to print numbers precisely (using the `%.17g` format string to printf).
 
 ## 1.10.1 - 2020-06-18

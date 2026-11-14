@@ -23,7 +23,17 @@
 @rem set JANET_COMPILE=cl /nologo /Isrc\include /Isrc\conf /c /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /MD /fsanitize=address /Zi
 @rem set JANET_LINK=link /nologo clang_rt.asan_dynamic-x86_64.lib clang_rt.asan_dynamic_runtime_thunk-x86_64.lib
 
-@set JANET_COMPILE=cl /nologo /Isrc\include /Isrc\conf /c /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /MD
+if DEFINED CLANG (
+    @set COMPILER=clang-cl.exe
+) else (
+    @set COMPILER=cl.exe
+)
+if DEFINED SANITIZE (
+    @set "SANITIZERS=/fsanitize=address"
+) else (
+    @set "SANITIZERS="
+)
+@set JANET_COMPILE=%COMPILER% /nologo /Isrc\include /Isrc\conf /c /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /MD %SANITIZERS%
 @set JANET_LINK=link /nologo
 
 @set JANET_LINK_STATIC=lib /nologo
@@ -41,32 +51,35 @@ if not exist build\boot mkdir build\boot
 @rem Build the bootstrap interpreter
 for %%f in (src\core\*.c) do (
     %JANET_COMPILE% /DJANET_BOOTSTRAP /Fobuild\boot\%%~nf.obj %%f
-    @if not errorlevel 0 goto :BUILDFAIL
+    @if errorlevel 1 goto :BUILDFAIL
 )
 for %%f in (src\boot\*.c) do (
     %JANET_COMPILE% /DJANET_BOOTSTRAP /Fobuild\boot\%%~nf.obj %%f
-    @if not errorlevel 0 goto :BUILDFAIL
+    @if errorlevel 1 goto :BUILDFAIL
 )
 %JANET_LINK% /out:build\janet_boot.exe build\boot\*.obj
-@if not errorlevel 0 goto :BUILDFAIL
+@if errorlevel 1 goto :BUILDFAIL
+@rem note that there is no default syspath being baked in
 build\janet_boot . > build\c\janet.c
+@if errorlevel 1 goto :BUILDFAIL
 
 @rem Build the sources
 %JANET_COMPILE% /Fobuild\janet.obj build\c\janet.c
-@if not errorlevel 0 goto :BUILDFAIL
+@if errorlevel 1 goto :BUILDFAIL
 %JANET_COMPILE% /Fobuild\shell.obj src\mainclient\shell.c
-@if not errorlevel 0 goto :BUILDFAIL
+@if errorlevel 1 goto :BUILDFAIL
 
 @rem Build the resources
 rc /nologo /fobuild\janet_win.res janet_win.rc
+@if errorlevel 1 goto :BUILDFAIL
 
 @rem Link everything to main client
 %JANET_LINK% /out:janet.exe build\janet.obj build\shell.obj build\janet_win.res
-@if not errorlevel 0 goto :BUILDFAIL
+@if errorlevel 1 goto :BUILDFAIL
 
 @rem Build static library (libjanet.lib)
 %JANET_LINK_STATIC% /out:build\libjanet.lib build\janet.obj
-@if not errorlevel 0 goto :BUILDFAIL
+@if errorlevel 1 goto :BUILDFAIL
 
 echo === Successfully built janet.exe for Windows ===
 echo === Run 'build_win test' to run tests. ==
@@ -89,16 +102,18 @@ exit /b 0
 
 @rem Clean build artifacts
 :CLEAN
-del *.exe *.lib *.exp
+del *.exe *.lib *.exp *.msi *.wixpdb
 rd /s /q build
-rd /s /q dist
+if exist dist (
+    rd /s /q dist
+)
 exit /b 0
 
 @rem Run tests
 :TEST
 for %%f in (test/suite*.janet) do (
     janet.exe test\%%f
-    @if not errorlevel 0 goto TESTFAIL
+    @if errorlevel 1 goto TESTFAIL
 )
 exit /b 0
 
@@ -117,7 +132,6 @@ copy README.md dist\README.md
 
 copy janet.lib dist\janet.lib
 copy janet.exp dist\janet.exp
-copy janet.def dist\janet.def
 
 janet.exe tools\patch-header.janet src\include\janet.h src\conf\janetconf.h build\janet.h
 copy build\janet.h dist\janet.h
@@ -135,11 +149,18 @@ if defined APPVEYOR_REPO_TAG_NAME (
     set RELEASE_VERSION=%JANET_VERSION%
 )
 if defined CI (
-    set WIXBIN="c:\Program Files (x86)\WiX Toolset v3.11\bin\"
+    set WIXBIN="%WIX%bin\"
+    echo WIXBIN = %WIXBIN%
 ) else (
     set WIXBIN=
 )
-%WIXBIN%candle.exe tools\msi\janet.wxs -arch %BUILDARCH% -out build\
+
+set WIXARCH=%BUILDARCH%
+if "%WIXARCH%"=="aarch64" (
+    set WIXARCH=arm64
+)
+
+%WIXBIN%candle.exe tools\msi\janet.wxs -arch %WIXARCH% -out build\
 %WIXBIN%light.exe "-sice:ICE38" -b tools\msi -ext WixUIExtension build\janet.wixobj -out janet-%RELEASE_VERSION%-windows-%BUILDARCH%-installer.msi
 exit /b 0
 

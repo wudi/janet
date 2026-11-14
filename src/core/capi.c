@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -25,14 +25,24 @@
 #include <janet.h>
 #include "state.h"
 #include "fiber.h"
+#include "util.h"
 #endif
 
 #ifndef JANET_SINGLE_THREADED
 #ifndef JANET_WINDOWS
 #include <pthread.h>
-#else
+#endif
+#endif
+
+#ifdef JANET_WINDOWS
 #include <windows.h>
 #endif
+
+#ifdef JANET_USE_STDATOMIC
+#include <stdatomic.h>
+/* We don't need stdatomic on most compilers since we use compiler builtins for atomic operations.
+ * Some (TCC), explicitly require using stdatomic.h and don't have any exposed builtins (that I know of).
+ * For TCC and similar compilers, one would need -std=c11 or similar then to get access. */
 #endif
 
 JANET_NO_RETURN static void janet_top_level_signal(const char *msg) {
@@ -40,11 +50,18 @@ JANET_NO_RETURN static void janet_top_level_signal(const char *msg) {
     JANET_TOP_LEVEL_SIGNAL(msg);
 #else
     fputs(msg, stdout);
+    if (!(janet_vm.sandbox_flags & JANET_SANDBOX_EXIT)) {
+        /* Exit is not forbidden */
+        exit(EXIT_FAILURE);
+    }
+    /* If not able to signal, then select good default behavior - for single threaded programs, we have no
+     * choice but to exit. */
 # ifdef JANET_SINGLE_THREADED
-    exit(-1);
+    exit(EXIT_FAILURE);
 # elif defined(JANET_WINDOWS)
     ExitThread(-1);
 # else
+    /* Other threads will continue as usual */
     pthread_exit(NULL);
 # endif
 #endif
@@ -52,6 +69,18 @@ JANET_NO_RETURN static void janet_top_level_signal(const char *msg) {
 
 void janet_signalv(JanetSignal sig, Janet message) {
     if (janet_vm.return_reg != NULL) {
+        /* Should match logic in janet_call for coercing everything not ok to an error (no awaits, yields, etc.) */
+        if (janet_vm.coerce_error && sig != JANET_SIGNAL_OK) {
+#ifdef JANET_EV
+            if (NULL != janet_vm.root_fiber && sig == JANET_SIGNAL_EVENT) {
+                janet_vm.root_fiber->sched_id++;
+            }
+#endif
+            if (sig != JANET_SIGNAL_ERROR) {
+                message = janet_wrap_string(janet_formatc("%v coerced from %s to error", message, janet_signal_names[sig]));
+            }
+            sig = JANET_SIGNAL_ERROR;
+        }
         *janet_vm.return_reg = message;
         if (NULL != janet_vm.fiber) {
             janet_vm.fiber->flags |= JANET_FIBER_DID_LONGJUMP;
@@ -296,9 +325,41 @@ int32_t janet_getinteger(const Janet *argv, int32_t n) {
 uint32_t janet_getuinteger(const Janet *argv, int32_t n) {
     Janet x = argv[n];
     if (!janet_checkuint(x)) {
-        janet_panicf("bad slot #%d, expected 32 bit signed integer, got %v", n, x);
+        janet_panicf("bad slot #%d, expected 32 bit unsigned integer, got %v", n, x);
     }
-    return janet_unwrap_integer(x);
+    return (uint32_t) janet_unwrap_number(x);
+}
+
+int16_t janet_getinteger16(const Janet *argv, int32_t n) {
+    Janet x = argv[n];
+    if (!janet_checkint16(x)) {
+        janet_panicf("bad slot #%d, expected 16 bit signed integer, got %v", n, x);
+    }
+    return (int16_t) janet_unwrap_number(x);
+}
+
+uint16_t janet_getuinteger16(const Janet *argv, int32_t n) {
+    Janet x = argv[n];
+    if (!janet_checkuint16(x)) {
+        janet_panicf("bad slot #%d, expected 16 bit unsigned integer, got %v", n, x);
+    }
+    return (uint16_t) janet_unwrap_number(x);
+}
+
+int8_t janet_getinteger8(const Janet *argv, int32_t n) {
+    Janet x = argv[n];
+    if (!janet_checkint8(x)) {
+        janet_panicf("bad slot #%d, expected 8 bit signed integer, got %v", n, x);
+    }
+    return (int8_t) janet_unwrap_number(x);
+}
+
+uint8_t janet_getuinteger8(const Janet *argv, int32_t n) {
+    Janet x = argv[n];
+    if (!janet_checkuint8(x)) {
+        janet_panicf("bad slot #%d, expected 8 bit unsigned integer, got %v", n, x);
+    }
+    return (uint8_t) janet_unwrap_number(x);
 }
 
 int64_t janet_getinteger64(const Janet *argv, int32_t n) {
@@ -421,7 +482,7 @@ Janet janet_dyn(const char *name) {
         return janet_table_get(janet_vm.top_dyns, janet_ckeywordv(name));
     }
     if (janet_vm.fiber->env) {
-        return janet_table_get(janet_vm.fiber->env, janet_ckeywordv(name));
+        return janet_table_get_keyword(janet_vm.fiber->env, name);
     } else {
         return janet_wrap_nil();
     }
@@ -437,6 +498,33 @@ void janet_setdyn(const char *name, Janet value) {
         }
         janet_table_put(janet_vm.fiber->env, janet_ckeywordv(name), value);
     }
+}
+
+/* Create a function that when called, returns X. Trivial in Janet, a pain in C. */
+JanetFunction *janet_thunk_delay(Janet x) {
+    static const uint32_t bytecode[] = {
+        JOP_LOAD_CONSTANT,
+        JOP_RETURN
+    };
+    JanetFuncDef *def = janet_funcdef_alloc();
+    def->arity = 0;
+    def->min_arity = 0;
+    def->max_arity = INT32_MAX;
+    def->flags = JANET_FUNCDEF_FLAG_VARARG;
+    def->slotcount = 1;
+    def->bytecode = janet_malloc(sizeof(bytecode));
+    def->bytecode_length = (int32_t)(sizeof(bytecode) / sizeof(uint32_t));
+    def->constants = janet_malloc(sizeof(Janet));
+    def->constants_length = 1;
+    def->name = NULL;
+    if (!def->bytecode || !def->constants) {
+        JANET_OUT_OF_MEMORY;
+    }
+    def->constants[0] = x;
+    memcpy(def->bytecode, bytecode, sizeof(bytecode));
+    janet_def_addflags(def);
+    /* janet_verify(def); */
+    return janet_thunk(def);
 }
 
 uint64_t janet_getflags(const Janet *argv, int32_t n, const char *flags) {
@@ -491,29 +579,65 @@ void *janet_optabstract(const Janet *argv, int32_t argc, int32_t n, const JanetA
     return janet_getabstract(argv, n, at);
 }
 
+uint32_t janet_optuinteger(const Janet *argv, int32_t argc, int32_t n, uint32_t dflt) {
+    if (argc <= n) return dflt;
+    if (janet_checktype(argv[n], JANET_NIL)) return dflt;
+    return janet_getuinteger(argv, n);
+}
+
+uint64_t janet_optuinteger64(const Janet *argv, int32_t argc, int32_t n, uint64_t dflt) {
+    if (argc <= n) return dflt;
+    if (janet_checktype(argv[n], JANET_NIL)) return dflt;
+    return janet_getuinteger64(argv, n);
+}
+
 /* Atomic refcounts */
 
 JanetAtomicInt janet_atomic_inc(JanetAtomicInt volatile *x) {
-#ifdef JANET_WINDOWS
-    return InterlockedIncrement(x);
+#ifdef _MSC_VER
+    return _InterlockedIncrement(x);
+#elif defined(JANET_USE_STDATOMIC)
+    return atomic_fetch_add_explicit(x, 1, memory_order_relaxed) + 1;
+#elif defined(JANET_PLAN9)
+    return aincl((void *)x, 1);
 #else
     return __atomic_add_fetch(x, 1, __ATOMIC_RELAXED);
 #endif
 }
 
 JanetAtomicInt janet_atomic_dec(JanetAtomicInt volatile *x) {
-#ifdef JANET_WINDOWS
-    return InterlockedDecrement(x);
+#ifdef _MSC_VER
+    return _InterlockedDecrement(x);
+#elif defined(JANET_USE_STDATOMIC)
+    return atomic_fetch_add_explicit(x, -1, memory_order_acq_rel) - 1;
+#elif defined(JANET_PLAN9)
+    return aincl((void *)x, -1);
 #else
     return __atomic_add_fetch(x, -1, __ATOMIC_ACQ_REL);
 #endif
 }
 
 JanetAtomicInt janet_atomic_load(JanetAtomicInt volatile *x) {
-#ifdef JANET_WINDOWS
-    return InterlockedOr(x, 0);
+#ifdef _MSC_VER
+    return _InterlockedOr(x, 0);
+#elif defined(JANET_PLAN9)
+    return agetl((void *)x);
+#elif defined(JANET_USE_STDATOMIC)
+    return atomic_load_explicit(x, memory_order_acquire);
 #else
     return __atomic_load_n(x, __ATOMIC_ACQUIRE);
+#endif
+}
+
+JanetAtomicInt janet_atomic_load_relaxed(JanetAtomicInt volatile *x) {
+#ifdef _MSC_VER
+    return _InterlockedOr(x, 0);
+#elif defined(JANET_PLAN9)
+    return agetl((void *)x);
+#elif defined(JANET_USE_STDATOMIC)
+    return atomic_load_explicit(x, memory_order_relaxed);
+#else
+    return __atomic_load_n(x, __ATOMIC_RELAXED);
 #endif
 }
 

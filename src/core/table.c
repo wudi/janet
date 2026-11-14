@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -67,7 +67,7 @@ static JanetTable *janet_table_init_impl(JanetTable *table, int32_t capacity, in
     return table;
 }
 
-/* Initialize a table (for use withs scratch memory) */
+/* Initialize a table (for use with scratch memory) */
 JanetTable *janet_table_init(JanetTable *table, int32_t capacity) {
     return janet_table_init_impl(table, capacity, 1);
 }
@@ -155,6 +155,17 @@ Janet janet_table_get(JanetTable *t, Janet key) {
     return janet_wrap_nil();
 }
 
+/* Used internally for compiler stuff */
+Janet janet_table_get_keyword(JanetTable *t, const char *keyword) {
+    int32_t keyword_len = (int32_t) strlen(keyword);
+    for (int i = JANET_MAX_PROTO_DEPTH; t && i; t = t->proto, --i) {
+        JanetKV *bucket = (JanetKV *) janet_dict_find_keyword(t->data, t->capacity, (const uint8_t *) keyword, keyword_len);
+        if (NULL != bucket && !janet_checktype(bucket->key, JANET_NIL))
+            return bucket->value;
+    }
+    return janet_wrap_nil();
+}
+
 /* Get a value out of the table, and record which prototype it was from. */
 Janet janet_table_get_ex(JanetTable *t, Janet key, JanetTable **which) {
     for (int i = JANET_MAX_PROTO_DEPTH; t && i; t = t->proto, --i) {
@@ -205,8 +216,8 @@ void janet_table_put(JanetTable *t, Janet key, Janet value) {
         } else {
             if (NULL == bucket || 2 * (t->count + t->deleted + 1) > t->capacity) {
                 janet_table_rehash(t, janet_tablen(2 * t->count + 2));
+                bucket = janet_table_find(t, key);
             }
-            bucket = janet_table_find(t, key);
             if (janet_checktype(bucket->value, JANET_BOOLEAN))
                 --t->deleted;
             bucket->key = key;
@@ -224,8 +235,8 @@ static void janet_table_put_no_overwrite(JanetTable *t, Janet key, Janet value) 
         return;
     if (NULL == bucket || 2 * (t->count + t->deleted + 1) > t->capacity) {
         janet_table_rehash(t, janet_tablen(2 * t->count + 2));
+        bucket = janet_table_find(t, key);
     }
-    bucket = janet_table_find(t, key);
     if (janet_checktype(bucket->value, JANET_BOOLEAN))
         --t->deleted;
     bucket->key = key;
@@ -249,7 +260,7 @@ JanetTable *janet_table_clone(JanetTable *table) {
     newTable->capacity = table->capacity;
     newTable->deleted = table->deleted;
     newTable->proto = table->proto;
-    newTable->data = janet_malloc(newTable->capacity * sizeof(JanetKV));
+    newTable->data = array_allocate(sizeof(JanetKV), newTable->capacity);
     if (NULL == newTable->data) {
         JANET_OUT_OF_MEMORY;
     }
@@ -319,13 +330,6 @@ JANET_CORE_FN(cfun_table_new,
     int32_t cap = janet_getnat(argv, 0);
     return janet_wrap_table(janet_table(cap));
 }
-/*
-    uint32_t flags = janet_getflags(argv, 1, "kv");
-    if (flags == 0) return janet_wrap_table(janet_table(cap));
-    if (flags == 1) return janet_wrap_table(janet_table_weakk(cap));
-    if (flags == 2) return janet_wrap_table(janet_table_weakv(cap));
-    return janet_wrap_table(janet_table_weakkv(cap));
-    */
 
 JANET_CORE_FN(cfun_table_weak,
               "(table/weak capacity)",
@@ -379,12 +383,18 @@ JANET_CORE_FN(cfun_table_setproto,
 }
 
 JANET_CORE_FN(cfun_table_tostruct,
-              "(table/to-struct tab)",
-              "Convert a table to a struct. Returns a new struct. This function "
-              "does not take into account prototype tables.") {
-    janet_fixarity(argc, 1);
+              "(table/to-struct tab &opt proto)",
+              "Return a struct based on a table `tab`. If given, "
+              "the optional argument `proto` specifies the new "
+              "struct's prototype. Note that if `proto` is not "
+              "specified, the new struct will not have a "
+              "prototype.") {
+    janet_arity(argc, 1, 2);
     JanetTable *t = janet_gettable(argv, 0);
-    return janet_wrap_struct(janet_table_to_struct(t));
+    JanetStruct proto = janet_optstruct(argv, argc, 1, NULL);
+    JanetStruct st = janet_table_to_struct(t);
+    janet_struct_proto(st) = proto;
+    return janet_wrap_struct(st);
 }
 
 JANET_CORE_FN(cfun_table_rawget,

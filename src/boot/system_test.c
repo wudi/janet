@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -22,7 +22,7 @@
 
 #include <janet.h>
 #include <assert.h>
-#include <stdio.h>
+#include <string.h>
 #include <math.h>
 
 #include "tests.h"
@@ -35,6 +35,11 @@ int system_test() {
     assert(sizeof(void *) == 8);
 #endif
 
+    /* Check the version defines are self consistent */
+    char version_combined[256];
+    snprintf(version_combined, sizeof(version_combined), "%d.%d.%d%s", JANET_VERSION_MAJOR, JANET_VERSION_MINOR, JANET_VERSION_PATCH, JANET_VERSION_EXTRA);
+    assert(!strcmp(JANET_VERSION, version_combined));
+
     /* Reflexive testing and nanbox testing */
     assert(janet_equals(janet_wrap_nil(), janet_wrap_nil()));
     assert(janet_equals(janet_wrap_false(), janet_wrap_false()));
@@ -46,6 +51,10 @@ int system_test() {
     assert(janet_equals(janet_wrap_number(1.4), janet_wrap_number(1.4)));
     assert(janet_equals(janet_wrap_number(3.14159265), janet_wrap_number(3.14159265)));
 #ifdef NAN
+#ifdef JANET_PLAN9
+    // Plan 9 traps NaNs by default; disable that.
+    setfcr(0);
+#endif
     assert(janet_checktype(janet_wrap_number(NAN), JANET_NUMBER));
 #else
     assert(janet_checktype(janet_wrap_number(0.0 / 0.0), JANET_NUMBER));
@@ -69,6 +78,14 @@ int system_test() {
     Janet tuple2 = janet_wrap_tuple(janet_tuple_end(t2));
 
     assert(janet_equals(tuple1, tuple2));
+
+    /* System test for GC bug #1888 */
+    JanetTable *env = janet_core_env(NULL);
+    janet_setdyn("probe", janet_wrap_integer(42));
+    assert(!janet_dostring(env, "(gccollect)", "gc", NULL));
+    Janet value = janet_dyn("probe");
+    assert(janet_checktype(value, JANET_NUMBER));
+    assert(janet_unwrap_integer(value) == 42);
 
     return 0;
 }

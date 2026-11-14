@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -46,19 +46,9 @@ JanetKV *janet_struct_begin(int32_t count) {
     return st;
 }
 
-/* Find an item in a struct without looking for prototypes. Should be similar to janet_dict_find, but
- * specialized to structs (slightly more compact). */
+/* Find an item in a struct without looking for prototypes. */
 const JanetKV *janet_struct_find(const JanetKV *st, Janet key) {
-    int32_t cap = janet_struct_capacity(st);
-    int32_t index = janet_maphash(cap, janet_hash(key));
-    int32_t i;
-    for (i = index; i < cap; i++)
-        if (janet_checktype(st[i].key, JANET_NIL) || janet_equals(st[i].key, key))
-            return st + i;
-    for (i = 0; i < index; i++)
-        if (janet_checktype(st[i].key, JANET_NIL) || janet_equals(st[i].key, key))
-            return st + i;
-    return NULL;
+    return janet_dict_find(st, janet_struct_capacity(st), key);
 }
 
 /* Put a kv pair into a struct that has not yet been fully constructed.
@@ -205,9 +195,9 @@ JanetTable *janet_struct_to_table(const JanetKV *st) {
 /* C Functions */
 
 JANET_CORE_FN(cfun_struct_with_proto,
-              "(struct/with-proto proto & kvs)",
-              "Create a structure, as with the usual struct constructor but set the "
-              "struct prototype as well.") {
+              "(struct/with-proto proto & ksvs)",
+              "Create a struct using the `proto` argument as the struct's "
+              "prototype. `ksvs` are as in the `struct` function.") {
     janet_arity(argc, 1, -1);
     JanetStruct proto = janet_optstruct(argv, argc, 0, NULL);
     if (!(argc & 1))
@@ -294,6 +284,16 @@ JANET_CORE_FN(cfun_struct_to_table,
     return janet_wrap_table(tab);
 }
 
+JANET_CORE_FN(cfun_struct_rawget,
+              "(struct/rawget st key)",
+              "Gets a value from a struct `st` without looking at the prototype struct. "
+              "If `st` does not contain the key directly, the function will return "
+              "nil without checking the prototype. Returns the value in the struct.") {
+    janet_fixarity(argc, 2);
+    JanetStruct st = janet_getstruct(argv, 0);
+    return janet_struct_rawget(st, argv[1]);
+}
+
 /* Load the struct module */
 void janet_lib_struct(JanetTable *env) {
     JanetRegExt struct_cfuns[] = {
@@ -301,6 +301,7 @@ void janet_lib_struct(JanetTable *env) {
         JANET_CORE_REG("struct/getproto", cfun_struct_getproto),
         JANET_CORE_REG("struct/proto-flatten", cfun_struct_flatten),
         JANET_CORE_REG("struct/to-table", cfun_struct_to_table),
+        JANET_CORE_REG("struct/rawget", cfun_struct_rawget),
         JANET_REG_END
     };
     janet_core_cfuns_ext(env, NULL, struct_cfuns);

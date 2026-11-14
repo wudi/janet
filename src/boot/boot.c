@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -106,6 +106,10 @@ int main(int argc, const char **argv) {
 
     status = janet_dobytes(env, boot_buffer, (int32_t) boot_size, boot_filename, NULL);
     janet_free(boot_buffer);
+
+    fprintf(stderr, "total bytecode instructions created: %" PRIi64 "\n", total_instruction_count);
+    fprintf(stderr, "total function definitions optimized: %" PRIi64 "\n", total_funcdefs_optimized);
+    fprintf(stderr, "total optimization loops executed: %" PRIi64 "\n", total_optimize_fixpoint_loops);
 
     /* Deinitialize vm */
     janet_deinit();

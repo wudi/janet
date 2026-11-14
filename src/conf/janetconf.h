@@ -4,17 +4,19 @@
 #define JANETCONF_H
 
 #define JANET_VERSION_MAJOR 1
-#define JANET_VERSION_MINOR 32
-#define JANET_VERSION_PATCH 1
+#define JANET_VERSION_MINOR 43
+#define JANET_VERSION_PATCH 0
 #define JANET_VERSION_EXTRA ""
-#define JANET_VERSION "1.32.1"
+#define JANET_VERSION "1.43.0"
 
 /* #define JANET_BUILD "local" */
 
 /* These settings all affect linking, so use cautiously. */
 /* #define JANET_SINGLE_THREADED */
+/* #define JANET_THREAD_LOCAL _Thread_local */
 /* #define JANET_NO_DYNAMIC_MODULES */
 /* #define JANET_NO_NANBOX */
+/* #define JANET_NANBOX_64_POINTER_SHIFT 0 */
 /* #define JANET_API __attribute__((visibility ("default"))) */
 
 /* These settings should be specified before amalgamation is
@@ -29,6 +31,7 @@
 /* #define JANET_NO_NET */
 /* #define JANET_NO_INT_TYPES */
 /* #define JANET_NO_EV */
+/* #define JANET_NO_FILEWATCH */
 /* #define JANET_NO_REALPATH */
 /* #define JANET_NO_SYMLINKS */
 /* #define JANET_NO_UMASK */
@@ -54,6 +57,7 @@
 /* #define JANET_NO_INTERPRETER_INTERRUPT */
 /* #define JANET_NO_IPV6 */
 /* #define JANET_NO_CRYPTORAND */
+/* #define JANET_USE_STDATOMIC */
 
 /* Custom vm allocator support */
 /* #include <mimalloc.h> */

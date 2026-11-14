@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -57,5 +57,7 @@ void janetc_regalloc_freetemp(JanetcRegisterAllocator *ra, int32_t reg, JanetcRe
 void janetc_regalloc_clone(JanetcRegisterAllocator *dest, JanetcRegisterAllocator *src);
 void janetc_regalloc_touch(JanetcRegisterAllocator *ra, int32_t reg);
 int janetc_regalloc_check(JanetcRegisterAllocator *ra, int32_t reg);
+int32_t janetc_regalloc_n(JanetcRegisterAllocator *ra, int32_t n);
+void janetc_regalloc_free_n(JanetcRegisterAllocator *ra, int32_t loc, int32_t n);
 
 #endif

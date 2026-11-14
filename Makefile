@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2026 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -43,9 +43,11 @@ JANET_DIST_DIR?=janet-dist
 JANET_BOOT_FLAGS:=. JANET_PATH '$(JANET_PATH)'
 JANET_TARGET_OBJECTS=build/janet.o build/shell.o
 JPM_TAG?=master
+SPORK_TAG?=master
 HAS_SHARED?=1
 DEBUGGER=gdb
 SONAME_SETTER=-Wl,-soname,
+STRIPFLAGS=-x -S
 
 # For cross compilation
 HOSTCC?=$(CC)
@@ -53,7 +55,7 @@ HOSTAR?=$(AR)
 # Symbols are (optionally) removed later, keep -g as default!
 CFLAGS?=-O2 -g
 LDFLAGS?=-rdynamic
-LIBJANET_LDFLAGS?=$(LD_FLAGS)
+LIBJANET_LDFLAGS?=$(LDFLAGS)
 RUN:=$(RUN)
 
 COMMON_CFLAGS:=-std=c99 -Wall -Wextra -Isrc/include -Isrc/conf -fvisibility=hidden -fPIC
@@ -78,6 +80,12 @@ ifeq ($(UNAME), Darwin)
 	LDCONFIG:=true
 else ifeq ($(UNAME), Linux)
 	CLIBS:=$(CLIBS) -lrt -ldl
+else ifeq ($(UNAME), SunOS)
+	BUILD_CFLAGS+=-D__EXTENSIONS__ -DJANET_NO_NANBOX
+	BOOT_CFLAGS+=-D__EXTENSIONS__ -DJANET_NO_NANBOX
+	CLIBS:=-lsocket -lm
+	STRIPFLAGS=-x
+	LDCONFIG:=false
 endif
 
 # For other unix likes, add flags here!
@@ -93,12 +101,18 @@ endif
 endif
 
 # Mingw
+MINGW_COMPILER=
 ifeq ($(findstring MINGW,$(UNAME)), MINGW)
+	MINGW_COMPILER=gcc
 	CLIBS:=-lws2_32 -lpsapi -lwsock32
 	LDFLAGS:=-Wl,--out-implib,$(JANET_IMPORT_LIB)
 	LIBJANET_LDFLAGS:=-Wl,--out-implib,$(JANET_LIBRARY_IMPORT_LIB)
 	JANET_TARGET:=$(JANET_TARGET).exe
 	JANET_BOOT:=$(JANET_BOOT).exe
+	COMPILER_VERSION:=$(shell $(CC) --version)
+	ifeq ($(findstring clang,$(COMPILER_VERSION)), clang)
+		MINGW_COMPILER=clang
+	endif
 endif
 
 
@@ -139,6 +153,7 @@ JANET_CORE_SOURCES=src/core/abstract.c \
 				   src/core/ev.c \
 				   src/core/ffi.c \
 				   src/core/fiber.c \
+				   src/core/filewatch.c \
 				   src/core/gc.c \
 				   src/core/inttypes.c \
 				   src/core/io.c \
@@ -204,9 +219,14 @@ build/%.bin.o: src/%.c $(JANET_HEADERS) $(JANET_LOCAL_HEADERS) Makefile
 ########################
 
 ifeq ($(UNAME), Darwin)
-SONAME=libjanet.1.32.dylib
+SONAME=libjanet.1.43.dylib
 else
-SONAME=libjanet.so.1.32
+SONAME=libjanet.so.1.43
+endif
+
+ifeq ($(MINGW_COMPILER), clang)
+	SONAME=
+	SONAME_SETTER=
 endif
 
 build/c/shell.c: src/mainclient/shell.c
@@ -240,6 +260,7 @@ $(JANET_STATIC_LIBRARY): $(JANET_TARGET_OBJECTS)
 # Testing assumes HOSTCC=CC
 
 TEST_SCRIPTS=$(wildcard test/suite*.janet)
+EXAMPLE_SCRIPTS=$(wildcard examples/*.janet)
 
 repl: $(JANET_TARGET)
 	$(RUN) ./$(JANET_TARGET)
@@ -247,21 +268,26 @@ repl: $(JANET_TARGET)
 debug: $(JANET_TARGET)
 	$(DEBUGGER) ./$(JANET_TARGET)
 
-VALGRIND_COMMAND=valgrind --leak-check=full --quiet
+VALGRIND_COMMAND=$(RUN) valgrind --leak-check=full --quiet
+CALLGRIND_COMMAND=$(RUN) valgrind --tool=callgrind
 
 valgrind: $(JANET_TARGET)
 	$(VALGRIND_COMMAND) ./$(JANET_TARGET)
 
-test: $(JANET_TARGET) $(TEST_PROGRAMS)
+test: $(JANET_TARGET) $(TEST_SCRIPTS) $(EXAMPLE_SCRIPTS)
 	for f in test/suite*.janet; do $(RUN) ./$(JANET_TARGET) "$$f" || exit; done
 	for f in examples/*.janet; do $(RUN) ./$(JANET_TARGET) -k "$$f"; done
 
-valtest: $(JANET_TARGET) $(TEST_PROGRAMS)
+valtest: $(JANET_TARGET) $(TEST_SCRIPTS) $(EXAMPLE_SCRIPTS)
 	for f in test/suite*.janet; do $(VALGRIND_COMMAND) ./$(JANET_TARGET) "$$f" || exit; done
-	for f in examples/*.janet; do ./$(JANET_TARGET) -k "$$f"; done
+	for f in examples/*.janet; do $(VALGRIND_COMMAND) ./$(JANET_TARGET) -k "$$f"; done
 
 callgrind: $(JANET_TARGET)
-	for f in test/suite*.janet; do valgrind --tool=callgrind ./$(JANET_TARGET) "$$f" || exit; done
+	$(CALLGRIND_COMMAND) ./$(JANET_TARGET)
+
+calltest: $(JANET_TARGET) $(TEST_SCRIPTS) $(EXAMPLE_SCRIPTS)
+	for f in test/suite*.janet; do $(CALLGRIND_COMMAND) ./$(JANET_TARGET) "$$f" || exit; done
+	for f in examples/*.janet; do $(CALLGRIND_COMMAND) ./$(JANET_TARGET) -k "$$f"; done
 
 ########################
 ##### Distribution #####
@@ -275,7 +301,7 @@ build/janet-%.tar.gz: $(JANET_TARGET) \
 	README.md build/c/janet.c build/c/shell.c
 	mkdir -p build/$(JANET_DIST_DIR)/bin
 	cp $(JANET_TARGET) build/$(JANET_DIST_DIR)/bin/
-	strip -x -S 'build/$(JANET_DIST_DIR)/bin/janet'
+	strip $(STRIPFLAGS) 'build/$(JANET_DIST_DIR)/bin/janet'
 	mkdir -p build/$(JANET_DIST_DIR)/include
 	cp build/janet.h build/$(JANET_DIST_DIR)/include/
 	mkdir -p build/$(JANET_DIST_DIR)/lib/
@@ -320,22 +346,23 @@ build/janet.pc: $(JANET_TARGET)
 	echo 'Libs.private: $(CLIBS)' >> $@
 
 install: $(JANET_TARGET) $(JANET_LIBRARY) $(JANET_STATIC_LIBRARY) build/janet.pc build/janet.h
+	$(eval JANET_VERSION := $(shell $(JANET_TARGET) -e '(print janet/version)'))
 	mkdir -p '$(DESTDIR)$(BINDIR)'
 	cp $(JANET_TARGET) '$(DESTDIR)$(BINDIR)/janet'
-	strip -x -S '$(DESTDIR)$(BINDIR)/janet'
+	strip $(STRIPFLAGS) '$(DESTDIR)$(BINDIR)/janet'
 	mkdir -p '$(DESTDIR)$(INCLUDEDIR)/janet'
 	cp -r build/janet.h '$(DESTDIR)$(INCLUDEDIR)/janet'
 	ln -sf ./janet/janet.h '$(DESTDIR)$(INCLUDEDIR)/janet.h'
 	mkdir -p '$(DESTDIR)$(JANET_PATH)'
 	mkdir -p '$(DESTDIR)$(LIBDIR)'
 	if test $(UNAME) = Darwin ; then \
-		cp $(JANET_LIBRARY) '$(DESTDIR)$(LIBDIR)/libjanet.$(shell $(JANET_TARGET) -e '(print janet/version)').dylib' ; \
+		cp $(JANET_LIBRARY) '$(DESTDIR)$(LIBDIR)/libjanet.$(JANET_VERSION).dylib' ; \
 		ln -sf $(SONAME) '$(DESTDIR)$(LIBDIR)/libjanet.dylib' ; \
-		ln -sf libjanet.$(shell $(JANET_TARGET) -e '(print janet/version)').dylib $(DESTDIR)$(LIBDIR)/$(SONAME) ; \
+		ln -sf libjanet.$(JANET_VERSION).dylib $(DESTDIR)$(LIBDIR)/$(SONAME) ; \
 	else \
-		cp $(JANET_LIBRARY) '$(DESTDIR)$(LIBDIR)/libjanet.so.$(shell $(JANET_TARGET) -e '(print janet/version)')' ; \
+		cp $(JANET_LIBRARY) '$(DESTDIR)$(LIBDIR)/libjanet.so.$(JANET_VERSION)' ; \
 		ln -sf $(SONAME) '$(DESTDIR)$(LIBDIR)/libjanet.so' ; \
-		ln -sf libjanet.so.$(shell $(JANET_TARGET) -e '(print janet/version)') $(DESTDIR)$(LIBDIR)/$(SONAME) ; \
+		ln -sf libjanet.so.$(JANET_VERSION) $(DESTDIR)$(LIBDIR)/$(SONAME) ; \
 	fi
 	cp $(JANET_STATIC_LIBRARY) '$(DESTDIR)$(LIBDIR)/libjanet.a'
 	mkdir -p '$(DESTDIR)$(JANET_MANPATH)'
@@ -357,6 +384,12 @@ install-jpm-git: $(JANET_TARGET)
 		JANET_BINPATH='$(BINDIR)' \
 		JANET_LIBPATH='$(LIBDIR)' \
 		$(RUN) ../../$(JANET_TARGET) ./bootstrap.janet
+
+install-spork-git: $(JANET_TARGET)
+	mkdir -p build
+	rm -rf build/spork
+	git clone --depth=1 --branch='$(SPORK_TAG)' https://github.com/janet-lang/spork.git build/spork
+	$(JANET_TARGET) -e '(bundle/install "build/spork")'
 
 uninstall:
 	-rm '$(DESTDIR)$(BINDIR)/janet'
@@ -386,9 +419,6 @@ clean:
 	-rm -rf build vgcore.* callgrind.*
 	-rm -rf test/install/build test/install/modpath
 
-test-install:
-	echo "JPM has been removed from default install."
-
 help:
 	@echo
 	@echo 'Janet: A Dynamic Language & Bytecode VM'
@@ -400,7 +430,8 @@ help:
 	@echo '   make test       Test a built Janet'
 	@echo '   make valgrind   Assess Janet with Valgrind'
 	@echo '   make callgrind  Assess Janet with Valgrind, using Callgrind'
-	@echo '   make valtest    Run the test suite with Valgrind to check for memory leaks'
+	@echo '   make valtest    Run the test suite and examples with Valgrind to check for memory leaks'
+	@echo '   make calltest   Run the test suite and examples with Callgrind'
 	@echo '   make dist       Create a distribution tarball'
 	@echo '   make docs       Generate documentation'
 	@echo '   make debug      Run janet with GDB or LLDB'
@@ -410,6 +441,9 @@ help:
 	@echo "   make format     Format Janet's own source files"
 	@echo '   make grammar    Generate a TextMate language grammar'
 	@echo
+	@echo '   make install-jpm-git   Install jpm into the current filesystem'
+	@echo '   make install-spork-git Install spork into the current filesystem'
+	@echo
 
-.PHONY: clean install repl debug valgrind test \
-	valtest dist uninstall docs grammar format help compile-commands
+.PHONY: clean install install-jpm-git install-spork-git repl debug valgrind test \
+	valtest callgrind callgrind-test dist uninstall docs grammar format help compile-commands

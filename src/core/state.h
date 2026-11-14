@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2023 Calvin Rose
+* Copyright (c) 2026 Calvin Rose
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to
@@ -23,11 +23,16 @@
 #ifndef JANET_STATE_H_defined
 #define JANET_STATE_H_defined
 
+#ifndef JANET_AMALG
+#include "features.h"
 #include <janet.h>
 #include <stdint.h>
+#endif
 
 #ifdef JANET_EV
-#ifndef JANET_WINDOWS
+#ifdef JANET_WINDOWS
+#include <windows.h>
+#else
 #include <pthread.h>
 #endif
 #endif
@@ -53,13 +58,22 @@ typedef struct {
     void *data;
 } JanetQueue;
 
+#ifdef JANET_EV
 typedef struct {
     JanetTimestamp when;
     JanetFiber *fiber;
     JanetFiber *curr_fiber;
     uint32_t sched_id;
     int is_error;
+    int has_worker;
+#ifdef JANET_WINDOWS
+    HANDLE worker;
+    HANDLE worker_event;
+#else
+    pthread_t worker;
+#endif
 } JanetTimeout;
+#endif
 
 /* Registry table for C functions - contains metadata that can
  * be looked up by cfunction pointer. All strings here are pointing to
@@ -100,6 +114,7 @@ struct JanetVM {
      * return point for panics. */
     jmp_buf *signal_buf;
     Janet *return_reg;
+    int coerce_error;
 
     /* The global registry for c functions. Used to store meta-data
      * along with otherwise bare c function pointers. */
@@ -149,6 +164,11 @@ struct JanetVM {
     JanetTraversalNode *traversal_top;
     JanetTraversalNode *traversal_base;
 
+    /* Thread safe strerror error buffer - for janet_strerror */
+#ifndef JANET_WINDOWS
+    char strerror_buf[256];
+#endif
+
     /* Event loop and scheduler globals */
 #ifdef JANET_EV
     size_t tq_count;
@@ -162,6 +182,8 @@ struct JanetVM {
     JanetTable signal_handlers;
 #ifdef JANET_WINDOWS
     void **iocp;
+    void *connect_ex; /* MSWsock extension if available */
+    int connect_ex_loaded;
 #elif defined(JANET_EV_EPOLL)
     pthread_attr_t new_thread_attr;
     JanetHandle selfpipe[2];

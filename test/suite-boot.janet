@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Calvin Rose
+# Copyright (c) 2026 Calvin Rose
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to
@@ -20,6 +20,8 @@
 
 (import ./helper :prefix "" :exit true)
 (start-suite)
+
+(setdyn *lint-warn* :none)
 
 # Let
 # 807f981
@@ -364,7 +366,7 @@
         "sort 5")
 (assert (<= ;(sort (map (fn [x] (math/random)) (range 1000)))) "sort 6")
 
-# #1283  
+# #1283
 (assert (deep=
           (partition 2 (generate [ i :in [:a :b :c :d :e]] i))
           '@[(:a :b) (:c :d) (:e)]))
@@ -754,7 +756,7 @@
     (default name (string "has-key? " (++ test-has-key-auto)))
     (assert (= expected (has-key? col key)) name)
     (if
-      # guarenteed by `has-key?` to never fail
+      # guaranteed by `has-key?` to never fail
       expected (in col key)
       # if `has-key?` is false, then `in` should fail (for indexed types)
       #
@@ -865,6 +867,13 @@
 (assert (deep= ~(,import* "a" :as "b" :fresh maybe)
                (macex '(import a :as b :fresh maybe))) "import macro 2")
 
+# 2af3f21d
+(assert-error "import macro 2" (macex '(import a :fresh)))
+(assert-error "import macro 3" (macex '(import a :as b :fresh)))
+(assert-error "import macro 4" (macex '(import b "notakeyword" value)))
+(assert (deep= ~(,import* "a" :fresh nil)
+               (macex '(import a :fresh nil))) "import macro 5")
+
 # #477 walk preserving bracket type
 # 0a1d902f4
 (assert (= :brackets (tuple/type (postwalk identity '[])))
@@ -896,10 +905,17 @@
   (struct/with-proto {:a [1 2 3]} :c 22 :b [1 2 3 4] :d "test" :e "test2"))
 (table/setproto table-to-freeze @{:a @[1 2 3]})
 
-(assert (deep= {:a [1 2 3] :b [1 2 3 4] :c 22 :d "test" :e "test2"}
-               (freeze table-to-freeze)))
+(assert (deep= struct-to-thaw (freeze table-to-freeze)))
 (assert (deep= table-to-freeze-with-inline-proto (thaw table-to-freeze)))
 (assert (deep= table-to-freeze-with-inline-proto (thaw struct-to-thaw)))
+
+# Check that freezing mutable keys is deterministic
+# for issue #1535
+(def hashes @{})
+(repeat 200
+  (def x (freeze {@"" 1 @"" 2 @"" 3 @"" 4 @"" 5}))
+  (put hashes (hash x) true))
+(assert (= 1 (length hashes)) "freeze mutable keys is deterministic")
 
 # Make sure Carriage Returns don't end up in doc strings
 # e528b86
@@ -955,6 +971,10 @@
 (defn case-4 [&]
   (def x (break (break (break)))))
 (bytecode-roundtrip case-4)
+(defn case-5 []
+  (def foo (fn [one two] one))
+  (foo 100 200))
+(bytecode-roundtrip case-5)
 
 # Debug bytecode of these functions
 # (pp (disasm case-1))
@@ -967,5 +987,115 @@
   (def b [;a])
   (identity a))
 (assert (= [1 2 3] (regress-1330)) "regression 1330")
+
+# Issue 1341
+(assert (= () '() (macex '())) "macex ()")
+(assert (= '[] (macex '[])) "macex []")
+
+(assert (= :a (with-env @{:b :a} (dyn :b))) "with-env dyn")
+(assert-error "unknown symbol +" (with-env @{} (eval '(+ 1 2))))
+
+(setdyn *debug* true)
+(def source '(defn a [x] (+ x x)))
+(eval source)
+(assert (= 20 (a 10)))
+(assert (deep= (get (dyn 'a) :source-form) source))
+(setdyn *debug* nil)
+
+# issue #1516
+(assert-error "assertf 1 argument" (macex '(assertf true)))
+(assert (assertf true "fun message") "assertf 2 arguments")
+(assert (assertf true "%s message" "mystery") "assertf 3 arguments")
+(assert (assertf (not nil) "%s message" "ordinary") "assertf not nil")
+(assert-error "assertf error 2" (assertf false "fun message"))
+(assert-error "assertf error 3" (assertf false "%s message" "mystery"))
+(assert-error "assertf error 4" (assertf nil "%s %s" "alice" "bob"))
+
+# issue #1535
+(loop [i :range [1 1000]]
+  (assert (deep-not= @{:key1 "value1" @"key" "value2"}
+                     @{:key1 "value1" @"key" "value2"}) "deep= mutable keys"))
+(assert (deep-not= {"abc" 123} {@"abc" 123}) "deep= mutable keys vs immutable key")
+(assert (deep-not= {@"" 1 @"" 2 @"" 3} {@"" 1 @"" 2 @"" 3}) "deep= duplicate mutable keys")
+(assert (deep-not= {@"" @"" @"" @"" @"" 3} {@"" @"" @"" @"" @"" 3}) "deep= duplicate mutable keys 2")
+(assert (deep-not= {@[] @"" @[] @"" @[] 3} {@[] @"" @[] @"" @[] 3}) "deep= duplicate mutable keys 3")
+(assert (deep-not= {@{} @"" @{} @"" @{} 3} {@{} @"" @{} @"" @{} 3}) "deep= duplicate mutable keys 4")
+(assert (deep-not= @{:key1 "value1" @"key2" @"value2"}
+                   @{:key1 "value1" @"key2" "value2"}) "deep= mutable keys")
+(assert (deep-not= @{:key1 "value1" [@"key2"] @"value2"}
+                   @{:key1 "value1" [@"key2"] @"value2"}) "deep= mutable keys")
+
+# different try overloads
+(assert (= (try (error :error) ([] :caught)) :caught))
+(assert (= (try (error :error) ([e] e)) :error))
+(assert (= (try (error :error) ([e fib] [e (fiber? fib)])) [:error true]))
+# regression test for #1659
+(assert (= (try (error :error) ([_ _] :caught)) :caught))
+
+# frequencies
+(assert (deep= (frequencies :lol) @{108 2 111 1}))
+(assert (deep= (frequencies [:duck :duck :duck :goose]) @{:duck 3 :goose 1}))
+(assert (deep= (frequencies {1 :a 2 :x 3 :x 8 :a}) @{:a 2 :x 2}))
+(assert (deep= (frequencies @{}) @{}))
+(assert (deep= (frequencies (coro (yield 1) (yield 8) (yield 2) (yield 8)))
+               @{1 1 2 1 8 2}))
+
+# partition-by
+(assert (deep= (partition-by even? "hello")
+               @[@[104] @[101] @[108 108] @[111]]))
+(assert (deep= (partition-by keyword? [:a "b" 'c :d])
+               @[@[:a] @["b" 'c] @[:d]]))
+# update
+(assert (deep= (update @"hello" 0 (fn [old delta] (+ old delta)) 17)
+               @"yello"))
+(assert (deep= (update @[:x :yy :z] 1 |(keyword (slice $ 0 1)))
+               @[:x :y :z]))
+(assert (deep= (update @{:a 1 :b -1 :c 3} :b + 3)
+               @{:a 1 :b 2 :c 3}))
+# distinct
+(assert (deep= (distinct :hello) @[104 101 108 111]))
+(assert (deep= (distinct [1 0 1 0 1 1 0 1 1 1]) @[1 0]))
+(assert (deep= (distinct @{0 :a 1 :b 2 :b 3 :a}) @[:a :b]))
+(assert (deep= (distinct (coro (yield 8) (yield 11) (yield 8))) @[8 11]))
+
+# find-index
+(assert (= (find-index |(= (chr "c") $) "abc") 2))
+(assert (= (find-index |(= $ :goose) [:duck :duck :goose]) 2))
+(assert (= (find-index pos? @[-2 -1 0 -3] :surprise!) :surprise!))
+(assert (= (find-index zero? {:a 2 :b 1 :c 0}) :c))
+
+# find
+(assert (= (find |(= $ (chr "o")) "tomato") 111))
+(assert (= (find |(= $ (chr "m")) "potato") nil))
+(assert (= (find |(> $ (chr "y")) :ant :surprise) :surprise))
+(assert (= (find pos? [-1 0 11]) 11))
+(assert (= (find neg? @[0 1 2 3 5]) nil))
+(assert (= (find one? {:a 1 :b 2}) 1))
+(assert (= (find even? @{:x 11 :y 28 :z 33}) 28))
+(assert (= (find keyword? (coro (yield 'jump) (yield :wave))) :wave))
+
+# partition
+(assert (deep= (partition 2 "hello!") @["he" "ll" "o!"]))
+(assert (deep= (partition 3 @"hello!") @["hel" "lo!"]))
+(assert (deep= (partition 4 'hello!) @["hell" "o!"]))
+(assert (deep= (partition 5 :hello!) @["hello" "!"]))
+(assert (deep= (partition 2 [:ant :bee :fox :elephant])
+               @[[:ant :bee] [:fox :elephant]]))
+(assert (deep= (partition 3 @['rock 'paper 'scissors 'spock])
+               @[['rock 'paper 'scissors] ['spock]]))
+(assert (deep= (partition 2 (coro (yield 0) (yield 1) (yield 2) (yield 3)))
+               @[[0 1] [2 3]]))
+# filter
+(assert (deep= (filter |(< $ (chr "m")) "azbycw") @[97 98 99]))
+(assert (deep= (filter pos? @[-1 0 1]) @[1]))
+(assert (deep= (sort (filter int? {:a 1 :b 2.3 :c 3})) @[1 3]))
+(assert (deep= (filter even? (coro (yield 1) (yield 2) (yield 8))) @[2 8]))
+
+# interpose
+(assert (deep= (interpose ":" "hello")
+               @[104 ":" 101 ":" 108 ":" 108 ":" 111]))
+(assert (deep= (interpose 0 [1 2 3]) @[1 0 2 0 3]))
+(assert (deep= (interpose :goose (coro (yield :duck) (yield :duck)))
+               @[:duck :goose :duck]))
 
 (end-suite)
